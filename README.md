@@ -10,7 +10,7 @@ To select a sender :
 * Right mouse click to select the sender
 
 ### Video player
-* Select "Video" from the menu and choose the video file
+* Select "Video" from the menu and choose the video file.
 
 ### Image
 * Select "Image" from the menu and choose the image file
@@ -20,3 +20,11 @@ To select a sender :
 * Select "About" for details.
 
 At program close there is an option to keep the new wallpaper or restore the original.
+
+## FFmpeg
+SpoutWallpaper uses FFmpeg to play videos. 
+FFmpeg.exe and FFprobe.exe are required.
+
+* Go to [https://github.com/GyanD/codexffmpeg/releases](https://github.com/GyanD/codexffmpeg/releases)
+* Choose the latest "Essentials" build. e.g. " ffmpeg-6.1.1-essentials_build.zip " and download the file.
+* Unzip the archive and copy "bin\FFmpeg.exe" and "bin\FFprobe.exe" to : "SpoutWallpaper\DATA\FFMPEG\"
