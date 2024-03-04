@@ -1,0 +1,1 @@
+Folder for images.Daily wallpaper is downloaded to this folder.Image archive : https://bing.wallpaper.pics/  
