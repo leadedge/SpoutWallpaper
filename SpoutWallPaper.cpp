@@ -71,6 +71,11 @@
 //		29.02.24 - Add image selection dialog
 //		02.02.24 - Add daily image description for about box and exit
 //		03.02.24 - Version 1.001
+//		06.02.24 - Use 'find' instead or 'rfind' for image url
+//				   Remove '?' from daily image title
+//				   Introduce bCurrentWallpaper to avoid repeated set in RestoreWallPaper
+//				   Render() - when the sender closes, restore daily or original wallpaper
+//				   Version 1.002
 //
 
 #include "stdafx.h"
@@ -119,7 +124,9 @@ void Render();
 HWND g_WorkerHwnd = NULL;               // Worker window handle
 
 // For the Bing daily wallpaper image
-std::string g_wallpaperpath;  // Current wallpaper
+std::string g_wallpaperpath;  // Current wallpaper image
+bool bCurrentWallpaper = false; // Showing current wallpaper
+std::string g_dailywallpaperpath; // Daily wallpaper image
 bool bDailyWallpaper = false; // Downloaded daily wallpaper
 bool bShowDaily = false;      // Showing daily wallpaper
 std::string copyright;        // Description for about and exit
@@ -198,6 +205,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	char path[MAX_PATH]{};
 	if (SystemParametersInfoA(SPI_GETDESKWALLPAPER, MAX_PATH, (void*)path, 0)) {
 		g_wallpaperpath = path;
+		bCurrentWallpaper = true;
 	}
 
 	//
@@ -391,7 +399,8 @@ void Render()
 				// Update the receiving buffer
 				if (g_pixelBuffer) delete[] g_pixelBuffer;
 				g_pixelBuffer = new unsigned char[g_SenderWidth * g_SenderHeight * 4];
-
+				// Not showiing current wallpaper
+				bCurrentWallpaper = false;
 				return; // return for next receive
 			}
 		}
@@ -399,15 +408,24 @@ void Render()
 			// Because SetReceiverName is used to select the sender,
 			// the receiver waits for that sender to re-open.
 			// Here we need to test to find if it was closed.
-			if (!receiver.sendernames.hasSharedInfo(receiver.GetSenderName()) && receiver.GetSenderCount() > 0) {
-				char name[256]{};
-				receiver.GetActiveSender(name);
-				receiver.SetReceiverName(name);
+			if (receiver.IsInitialized() && !receiver.sendernames.hasSharedInfo(receiver.GetSenderName())) {
+				// Clear the receiver name
+				receiver.SetReceiverName();
 			}
-			else if(g_pixelBuffer){
+			
+			if (g_pixelBuffer) {
 				receiver.ReleaseReceiver();
-				if (g_pixelBuffer) delete[] g_pixelBuffer;
+				delete[] g_pixelBuffer;
 				g_pixelBuffer = nullptr;
+			}
+
+			// If a daily wallpaper has been downloaded, show it
+			if (bDailyWallpaper && !g_wallpaperpath.empty()) {
+				SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)g_dailywallpaperpath.c_str(), SPIF_UPDATEINIFILE);
+				bShowDaily = true;
+			}
+			else {
+				// Otherwise restore wallpaper
 				RestoreWallPaper();
 			}
 		} // endif ReceiveImage
@@ -567,6 +585,24 @@ void ShowContextMenu(HWND hWnd)
 
 		// Insert all the Sender names as menu items
 		if(spout.sendernames.GetSenderNames(&Senders)) {
+			// Run through again and check whether the sender exists
+			// and if not release the sender from the local sender list
+			if (Senders.size() > 0) {
+				for (iter = Senders.begin(); iter != Senders.end(); iter++) {
+					namestring = *iter; // the Sender name string
+					strcpy_s(name, namestring.c_str());
+					// we have the name already, so look for it's info
+					if (!spout.sendernames.getSharedInfo(name, &info)) {
+						// Sender does not exist any more
+						spout.sendernames.ReleaseSenderName(name); // release from the shared memory list
+					}
+				}
+			}
+
+			// Now we have cleaned up the list in shared memory, so get it again
+			Senders.clear();
+			spout.sendernames.GetSenderNames(&Senders);
+
             // Add all the Sender names as items to the dialog list.
 			if(Senders.size() > 0) {
 				// Get the active Sender name
@@ -640,9 +676,10 @@ void RestoreWallPaper()
 		SystemParametersInfoA(SPI_GETDESKWALLPAPER, MAX_PATH, (PVOID)szWallPaper, 0);
 		if (szWallPaper) g_wallpaperpath = szWallPaper;
 	}
-
-	if (!g_wallpaperpath.empty()) {
+	// Restore original wallpaper if not already being shown
+	if (!g_wallpaperpath.empty() && !bCurrentWallpaper) {
 		SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (PVOID)g_wallpaperpath.c_str(), SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE);
+		bCurrentWallpaper = true;
 	}
 }
 
@@ -933,8 +970,12 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				if (OpenFile(filepath, MAX_PATH)) {
 					// Set the new wallpaper
 					SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filepath, SPIF_UPDATEINIFILE);
+					// Save the image path
+					g_dailywallpaperpath = filepath;
 					// Flag download of wallpaper for exit
 					bDailyWallpaper = true;
+					// Not showing original wallpaper
+					bCurrentWallpaper = false;
 					// Bypass Spout and Video in Render()
 					bShowDaily = true;
 					// Replace Bing daily image details with the image name
@@ -963,6 +1004,7 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					jsonFile += "\\BingDaily.json";
 					const char* url = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=en-US";
 					if (URLDownloadToFileA(NULL, url, jsonFile.c_str(), 0, NULL) == S_OK) {
+
 						// Get the json file text as a single string
 						if (_access(jsonFile.c_str(), 0) != -1) {
 							// Open the file
@@ -975,12 +1017,14 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 								logstream.close();
 								// Find the image url in the json string
 								std::string imageurl = logstr.substr(logstr.find("url")+6);
-								imageurl = imageurl.substr(0, imageurl.rfind("jpg")+3);
+								imageurl = imageurl.substr(0, imageurl.find("jpg")+3);
 								std::string bingUrl = "https://www.bing.com";
 								bingUrl += imageurl;
 								// Find the title e.g "title":"An ice day to play"
 								std::string title = logstr.substr(logstr.find("title")+8);
 								title = title.substr(0, title.find("quiz")-3);
+								// Remove all '?'
+								title.erase(std::remove(title.begin(), title.end(), '?'), title.end());
 								// Find the copyright description for About and Exit
 								copyright = logstr.substr(logstr.find("copyright")+12);
 								copyright = copyright.substr(0, copyright.find("copyrightlink")-3);
@@ -1001,9 +1045,14 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 								else {
 									filePath = fileName;
 								}
+
 								if (!filePath.empty()) {
 									// Set the new wallpaper
 									SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filePath.c_str(), SPIF_UPDATEINIFILE);
+									// Save the daily wallpaper image path
+									g_dailywallpaperpath = filePath;
+									// Not showing original wallpaper
+									bCurrentWallpaper = false;
 									// Flag download of wallpaper for exit
 									bDailyWallpaper = true;
 									// Bypass Spout and Video in Render()
