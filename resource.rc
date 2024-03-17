@@ -8,10 +8,9 @@
 #include "resource.h"
 
 
-
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 IDD_DLG_DIALOG DIALOGEX 0, 0, 178, 107
-STYLE DS_CENTER | DS_MODALFRAME | DS_SHELLFONT | WS_CAPTION | WS_GROUP | WS_POPUP | WS_SYSMENU
+STYLE DS_CENTER | DS_MODALFRAME | DS_SHELLFONT | WS_CAPTION | WS_GROUP | WS_POPUP
 EXSTYLE WS_EX_APPWINDOW
 CAPTION "SpoutWallPaper"
 FONT 8, "MS Shell Dlg", 0, 0, 1
@@ -19,6 +18,17 @@ FONT 8, "MS Shell Dlg", 0, 0, 1
         DEFPUSHBUTTON   "OK", IDOK, 90, 87, 32, 14, BS_CENTER, WS_EX_LEFT
 }
 
+IDD_DURATIONBOX DIALOGEX 0, 0, 105, 58
+STYLE DS_3DLOOK | DS_CENTER | DS_MODALFRAME | DS_SHELLFONT | WS_CAPTION | WS_VISIBLE | WS_POPUP
+CAPTION "Slide duration"
+FONT 9, "Ms Shell Dlg", 0, 0, 1
+{
+    COMBOBOX        IDC_SLIDE_DURATION,         20,  7, 62, 80, CBS_DROPDOWN | CBS_HASSTRINGS, WS_EX_LEFT
+    AUTOCHECKBOX    "Random", IDC_SLIDE_RANDOM, 20, 22, 41, 8, 0, WS_EX_LEFT
+
+    DEFPUSHBUTTON   "OK", IDOK,         20, 40, 30, 12, 0, WS_EX_LEFT
+    PUSHBUTTON      "Cancel", IDCANCEL, 52, 40, 30, 12, 0, WS_EX_LEFT
+}
 
 //
 // Accelerator resources
@@ -41,8 +51,8 @@ IDI_STEALTHDLG     ICON           "SpoutLogo4.ico"
 // Version Information resources
 //
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1, 0, 0, 2
-PRODUCTVERSION  1, 0, 0, 2
+FILEVERSION     1, 0, 0, 3
+PRODUCTVERSION  1, 0, 0, 3
 FILEOS          VOS_NT
 FILETYPE        VFT_APP
 FILESUBTYPE     VFT2_UNKNOWN
@@ -54,8 +64,8 @@ FILEFLAGS       0
         BLOCK "080904E4"
         {
             VALUE "CompanyName", "Leading Edge Pty. Ltd.\0"
-                VALUE "FileVersion", "1.002\0"
-                VALUE "ProductVersion", "1.002\0"
+                VALUE "FileVersion", "1.003\0"
+                VALUE "ProductVersion", "1.003\0"
                 VALUE "LegalCopyright", "Copyright \251 2024 Lynn Jarvis\0"
                 VALUE "FileDescription", "SpoutWallPaper\0"
                 VALUE "InternalName", "SpoutWallPaper\0"

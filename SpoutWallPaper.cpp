@@ -20,7 +20,11 @@
 //
 //		Daily wallpaper
 //		  Select "Daily" from the menu.
-//		  Select "About" for details.
+//
+//		Slideshow
+//		  Select image folder, enter slide duration and check "Random" if required
+//
+//		"About" for details.
 //
 //		At program close there is an option to keep the new wallpaper or restore the original.
 //
@@ -76,16 +80,23 @@
 //				   Introduce bCurrentWallpaper to avoid repeated set in RestoreWallPaper
 //				   Render() - when the sender closes, restore daily or original wallpaper
 //				   Version 1.002
+//		10.03.24 - Introduce bCurrentWallpaper if showing original wallpaper for video
+//				   SPIF_SENDCHANGE instead of SPIF_UPDATEINIFILE for wallpaper change
+//				   unless restoring or setting wallpaper
+//				 - Add slideshow option with image path, slide duration and random change
+//		12.03.24 - Update slide image details for About and Exit
+//		17.03.24 - Version 1.003
 //
 
 #include "stdafx.h"
 #include <windows.h>
 #include <stdio.h> // for printf if used
+#include <shlobj.h>
 #include <commdlg.h> // for explorer dialog
 #include "..\..\SpoutDirectX\SpoutDX\SpoutDX.h"
 #include "resource.h"
 
- // for PathStripPath
+// for PathStripPath
 #include <Shlwapi.h>
 #pragma comment (lib, "Shlwapi.lib")
 
@@ -120,16 +131,27 @@ HWND g_hWnd = NULL;                     // Window handle
 unsigned char* g_pixelBuffer = nullptr; // Receiving pixel buffer
 unsigned int g_SenderWidth = 0;         // Received sender width
 unsigned int g_SenderHeight = 0;        // Received sender height
-void Render();
 HWND g_WorkerHwnd = NULL;               // Worker window handle
+void Render();
 
 // For the Bing daily wallpaper image
-std::string g_wallpaperpath;  // Current wallpaper image
-bool bCurrentWallpaper = false; // Showing current wallpaper
+std::string g_wallpaperpath;      // Current wallpaper image
+bool bCurrentWallpaper = false;   // Showing current wallpaper
 std::string g_dailywallpaperpath; // Daily wallpaper image
-bool bDailyWallpaper = false; // Downloaded daily wallpaper
-bool bShowDaily = false;      // Showing daily wallpaper
-std::string copyright;        // Description for about and exit
+bool bDailyWallpaper = false;     // Downloaded daily wallpaper
+bool bShowDaily = false;          // Showing daily wallpaper
+std::string copyright;            // Description for about and exit
+
+// For slideshow
+bool bSlideShow = false;
+bool OpenFolder(char* filepath, int maxchars);
+char g_slideshowpath[MAX_PATH]{}; // Slideshow folder
+char startingfolder[MAX_PATH]{}; // Initial browse dialog folder
+int nCurrentImage = 0;
+DWORD g_slideshowtime = 30; // Seconds per frame
+double g_start = 0.0; // Start time
+std::vector<std::string> slidenames; // Slideshow file names
+int GetImageFiles(const char* spath, std::vector<std::string>& filenames);
 
 // For FFmpeg video player
 std::string g_videopath;            // The full video path
@@ -152,6 +174,16 @@ void CloseVideo();
 bool OpenFile(char* filepath, int maxchars, bool bVideo = false);
 bool ffprobe(std::string videoPath);
 INT_PTR CALLBACK DlgProc(HWND, UINT, WPARAM, LPARAM);
+
+// Slide duration
+bool SelectSlideDuration();
+static INT_PTR CALLBACK SlideDuration(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+static int durationindex = 0; // for the combobox
+static int duration[13]= { 2, 4, 10, 30, 60, 120, 240, 600, 1800, 3600, 7200, 14400, 36000 }; // seconds
+static bool bRandom = false;
+
+// For folder selection
+INT CALLBACK BrowseCallbackProc(HWND hwnd, UINT uMsg, LPARAM lp, LPARAM pData);
 BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam);
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
@@ -160,22 +192,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	HACCEL hAccelTable = NULL;
 
 	// Console window so printf works
-	// FILE* pCout;
-	// AllocConsole();
-	// freopen_s(&pCout, "CONOUT$", "w", stdout); 
-	// printf("SpoutWallPaper\n");
+	FILE* pCout;
+	AllocConsole();
+	freopen_s(&pCout, "CONOUT$", "w", stdout); 
+	printf("SpoutWallPaper\n");
 
 	// Try to open the application mutex
 	g_hMutex = OpenMutexA(MUTEX_ALL_ACCESS, 0, "SpoutWallpaper");
 	// If it exists, don't open again
 	if (g_hMutex) {
+		SpoutMessageBox("SpoutWallpaper is already running");
 		// Close it now, otherwise it is never released
 		CloseHandle(g_hMutex);
 		return 0;
-	}
-	else {
-		// Create one to prevent repeat opens
-		g_hMutex = CreateMutexA(0, 0, "SpoutWallpaper");
 	}
 
 	// Executable location
@@ -207,6 +236,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		g_wallpaperpath = path;
 		bCurrentWallpaper = true;
 	}
+
+	// Get the last slideshow path and slide time
+	ReadPathFromRegistry(HKEY_CURRENT_USER, "Software\\Leading Edge\\SpoutWallpaper", "slideshowfolder", g_slideshowpath);
+	ReadDwordFromRegistry(HKEY_CURRENT_USER, "Software\\Leading Edge\\SpoutWallpaper", "slideshowtime", &g_slideshowtime);
+
 
 	//
 	// Optional command line : SpoutWallPaper "video name"
@@ -355,6 +389,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			g_wallpaperpath.clear();
 		}
 	}
+
 	RestoreWallPaper();
 
 	// Release DirectX 11 resources
@@ -371,10 +406,53 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 //
 void Render()
 {
-
 	// No rendering for wallpaper image
 	if (bShowDaily)
 		return;
+	
+	if (!slidenames.empty() && g_start > 0.0) {
+
+		//
+		// Slideshow
+		//
+
+		// Not showing original wallpaper
+		bCurrentWallpaper = false;
+
+		// Calculate frame time for slide duration
+		double msecs = ElapsedMicroseconds()/1000.0;
+		double elapsed = msecs-g_start; // msec elapsed
+
+		std::string slidepath = g_slideshowpath;
+		slidepath += "\\";
+		if (nCurrentImage == 0 || elapsed > (double)(g_slideshowtime*1000)) { // seconds to msec
+			
+			g_start = msecs;
+			slidepath += slidenames[nCurrentImage];
+			SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)slidepath.c_str(), SPIF_SENDCHANGE);
+			
+			// Not showing original wallpaper
+			bCurrentWallpaper = false;
+
+			// Update details for About and Exit
+			char filepath[MAX_PATH]{};
+			strcpy_s(filepath, slidepath.c_str());
+			PathStripPathA(filepath);
+			copyright = filepath;
+			
+			// Update image index
+			if (bRandom) {
+				nCurrentImage = rand()%(slidenames.size());
+			}
+			else {
+				nCurrentImage++;
+				if (nCurrentImage > slidenames.size()-1)
+					nCurrentImage = 0;
+			}
+
+		}
+		return;
+	}
 
 	if (g_videopath.empty()) {
 
@@ -399,8 +477,10 @@ void Render()
 				// Update the receiving buffer
 				if (g_pixelBuffer) delete[] g_pixelBuffer;
 				g_pixelBuffer = new unsigned char[g_SenderWidth * g_SenderHeight * 4];
-				// Not showiing current wallpaper
+
+				// Not showing current wallpaper
 				bCurrentWallpaper = false;
+
 				return; // return for next receive
 			}
 		}
@@ -408,11 +488,10 @@ void Render()
 			// Because SetReceiverName is used to select the sender,
 			// the receiver waits for that sender to re-open.
 			// Here we need to test to find if it was closed.
-			if (receiver.IsInitialized() && !receiver.sendernames.hasSharedInfo(receiver.GetSenderName())) {
+			if (!receiver.sendernames.hasSharedInfo(receiver.GetSenderName()))
 				// Clear the receiver name
 				receiver.SetReceiverName();
-			}
-			
+
 			if (g_pixelBuffer) {
 				receiver.ReleaseReceiver();
 				delete[] g_pixelBuffer;
@@ -421,7 +500,7 @@ void Render()
 
 			// If a daily wallpaper has been downloaded, show it
 			if (bDailyWallpaper && !g_wallpaperpath.empty()) {
-				SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)g_dailywallpaperpath.c_str(), SPIF_UPDATEINIFILE);
+				SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)g_dailywallpaperpath.c_str(), SPIF_SENDCHANGE);
 				bShowDaily = true;
 			}
 			else {
@@ -462,7 +541,7 @@ void Render()
 	if (g_pixelBuffer) {
 
 		// Must use GetDCEx
-		HDC hdc = GetDCEx(g_WorkerHwnd, 0, DCX_WINDOW); // (DeviceContextValues)0x403);
+		HDC hdc = GetDCEx(g_WorkerHwnd, 0, DCX_WINDOW);
 		RECT dr{};
 		GetWindowRect(g_WorkerHwnd, &dr);
 
@@ -480,15 +559,17 @@ void Render()
 		// Very fast (< 1msec at 1280x720)
 		SetStretchBltMode(hdc, COLORONCOLOR); // Fastest method
 		StretchDIBits(hdc,
-				0, 0, (dr.right - dr.left), (dr.bottom - dr.top), // destination rectangle
-				0, 0, g_SenderWidth, g_SenderHeight, // source rectangle
-				g_pixelBuffer,
-				&bmi, DIB_RGB_COLORS, SRCCOPY);
+			0, 0, (dr.right - dr.left), (dr.bottom - dr.top), // destination rectangle
+			0, 0, g_SenderWidth, g_SenderHeight, // source rectangle
+			g_pixelBuffer,
+			&bmi, DIB_RGB_COLORS, SRCCOPY);
 		ReleaseDC(g_WorkerHwnd, hdc);
-	}
 
-	// 60 fps can give a better result but 30 reduces CPU load
-	receiver.HoldFps(30);
+		// Hold at 30 fps reduces CPU load
+		receiver.HoldFps(30);
+
+		return;
+	}
 
 }
 
@@ -585,24 +666,8 @@ void ShowContextMenu(HWND hWnd)
 
 		// Insert all the Sender names as menu items
 		if(spout.sendernames.GetSenderNames(&Senders)) {
-			// Run through again and check whether the sender exists
-			// and if not release the sender from the local sender list
-			if (Senders.size() > 0) {
-				for (iter = Senders.begin(); iter != Senders.end(); iter++) {
-					namestring = *iter; // the Sender name string
-					strcpy_s(name, namestring.c_str());
-					// we have the name already, so look for it's info
-					if (!spout.sendernames.getSharedInfo(name, &info)) {
-						// Sender does not exist any more
-						spout.sendernames.ReleaseSenderName(name); // release from the shared memory list
-					}
-				}
-			}
-
-			// Now we have cleaned up the list in shared memory, so get it again
 			Senders.clear();
 			spout.sendernames.GetSenderNames(&Senders);
-
             // Add all the Sender names as items to the dialog list.
 			if(Senders.size() > 0) {
 				// Get the active Sender name
@@ -627,6 +692,7 @@ void ShowContextMenu(HWND hWnd)
 		AppendMenu(hMenu, MF_STRING, IDM_VIDEO, _T("Video"));
 		AppendMenu(hMenu, MF_STRING, IDM_IMAGE, _T("Image"));
 		AppendMenu(hMenu, MF_STRING, IDM_DAILY, _T("Daily"));
+		AppendMenu(hMenu, MF_STRING, IDM_SLIDESHOW, _T("Slideshow"));
 		AppendMenu(hMenu, MF_STRING, IDM_ABOUT, _T("About"));
 		InsertMenu(hMenu, -1, MF_BYPOSITION, SWM_EXIT, _T("Exit"));
 
@@ -671,12 +737,14 @@ ULONGLONG GetDllVersion(LPCTSTR lpszDllName)
 
 void RestoreWallPaper()
 {
+	// Get the current wallpaper if not already
 	if (g_wallpaperpath.empty()) {
 		char szWallPaper[MAX_PATH]{};
 		SystemParametersInfoA(SPI_GETDESKWALLPAPER, MAX_PATH, (PVOID)szWallPaper, 0);
 		if (szWallPaper) g_wallpaperpath = szWallPaper;
 	}
-	// Restore original wallpaper if not already being shown
+
+	// Restore original wallpaper if not being shown
 	if (!g_wallpaperpath.empty() && !bCurrentWallpaper) {
 		SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (PVOID)g_wallpaperpath.c_str(), SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE);
 		bCurrentWallpaper = true;
@@ -784,6 +852,36 @@ bool OpenFile(char* filepath, int maxchars, bool bVideo)
 }
 
 
+// Dialog to select a slideshow folder
+bool OpenFolder(char* filepath, int maxchars)
+{
+	char szDir[MAX_PATH]{};
+	BROWSEINFOA bInfo{};
+	bInfo.hwndOwner = NULL; // Owner window
+	bInfo.pidlRoot = NULL;
+	bInfo.pszDisplayName = szDir; // Address of a buffer to receive the display name of the folder selected by the user
+	bInfo.lpszTitle = "Select a folder for slideshow images"; // Title of the dialog
+	bInfo.ulFlags = 0;
+	bInfo.lpfn = BrowseCallbackProc;
+	bInfo.lParam = 0;
+	bInfo.iImage = -1;
+	// Larger dialog but does not scroll to selected folder
+	// bInfo.ulFlags = BIF_NEWDIALOGSTYLE | BIF_NONEWFOLDERBUTTON; // Larger dialog
+
+	// Set starting folder for Browse
+	strcpy_s(startingfolder, MAX_PATH, filepath);
+
+	LPITEMIDLIST lpItem = SHBrowseForFolderA(&bInfo);
+	if (lpItem != NULL) {
+		SHGetPathFromIDListA(lpItem, szDir);
+		strcpy_s(filepath, maxchars, szDir);
+		return true;
+	}
+
+	return false;
+}
+
+
 // Run FFprobe on a video file and produce an ini file with the stream information
 bool ffprobe(std::string videoPath)
 {
@@ -878,6 +976,36 @@ bool ffprobe(std::string videoPath)
 	return true;
 }
 
+// Get image files for slideshow
+int GetImageFiles(const char* spath, std::vector<std::string>&filenames)
+{
+	char tmp[MAX_PATH]{};
+	HANDLE filehandle = NULL;
+	WIN32_FIND_DATAA filedata;
+
+	sprintf_s(tmp, MAX_PATH, "%s\\*.*", spath);
+	int nFiles = 0;
+	filehandle = FindFirstFileA((LPCSTR)tmp, (LPWIN32_FIND_DATAA)&filedata);
+	if (PtrToUint(filehandle) > 0) {
+		do {
+			if ((filedata.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+				if (strstr((char*)filedata.cFileName, ".jpg") != 0
+					|| strstr((char*)filedata.cFileName, ".png") != 0
+					|| strstr((char*)filedata.cFileName, ".gif") != 0
+					|| strstr((char*)filedata.cFileName, ".bmp") != 0
+					|| strstr((char*)filedata.cFileName, ".tga") != 0
+					|| strstr((char*)filedata.cFileName, ".tif") != 0) {
+						slidenames.push_back(filedata.cFileName);
+						nFiles++;
+				}
+			}
+		} while (FindNextFileA(filehandle, (LPWIN32_FIND_DATAA)&filedata));
+	}
+
+	return nFiles;
+
+} // end GetImageFiles
+
 
 // Message handler for the app
 INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -923,8 +1051,13 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			receiver.SetReceiverName(name); // set the name for the receiver to use
 			// Close video
 			CloseVideo();
+			// Clear slideshow
+			slidenames.clear();
 			// Disable daily wallpaper display
 			bShowDaily = false;
+			// Set timer for 30 msec
+			KillTimer(hWndMain, 1);
+			SetTimer(hWndMain, 1, 30, NULL);
 			break;
 		}
 
@@ -946,8 +1079,15 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 						g_videopath = filepath;
 						// Close receiver
 						receiver.ReleaseReceiver();
+						// Clear any slideshow
+						slidenames.clear();
 						// Disable daily wallpaper display
 						bShowDaily = false;
+						// Not showing original wallpaper
+						bCurrentWallpaper = false;
+						// Set timer for 30 msec
+						KillTimer(hWndMain, 1);
+						SetTimer(hWndMain, 1, 30, NULL);
 					}
 					else {
 						CloseVideo();
@@ -965,11 +1105,13 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				CloseVideo();
 				// Close receiver
 				receiver.ReleaseReceiver();
+				// Clear any slideshow
+				slidenames.clear();
 				// Default is image not downloaded
 				bDailyWallpaper = false;
 				if (OpenFile(filepath, MAX_PATH)) {
 					// Set the new wallpaper
-					SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filepath, SPIF_UPDATEINIFILE);
+					SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filepath, SPIF_SENDCHANGE);
 					// Save the image path
 					g_dailywallpaperpath = filepath;
 					// Flag download of wallpaper for exit
@@ -981,6 +1123,9 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					// Replace Bing daily image details with the image name
 					PathStripPathA(filepath);
 					copyright = filepath;
+					// Set timer for every 2 seconds
+					KillTimer(hWndMain, 1);
+					SetTimer(hWndMain, 1, 2000, NULL);
 				}
 			}
 			break;
@@ -995,6 +1140,8 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					CloseVideo();
 					// Close receiver
 					receiver.ReleaseReceiver();
+					// Clear any slideshow
+					slidenames.clear();
 					// Default is image not downloaded
 					bDailyWallpaper = false;
 
@@ -1004,7 +1151,6 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					jsonFile += "\\BingDaily.json";
 					const char* url = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=en-US";
 					if (URLDownloadToFileA(NULL, url, jsonFile.c_str(), 0, NULL) == S_OK) {
-
 						// Get the json file text as a single string
 						if (_access(jsonFile.c_str(), 0) != -1) {
 							// Open the file
@@ -1048,7 +1194,7 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 								if (!filePath.empty()) {
 									// Set the new wallpaper
-									SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filePath.c_str(), SPIF_UPDATEINIFILE);
+									SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filePath.c_str(), SPIF_SENDCHANGE);
 									// Save the daily wallpaper image path
 									g_dailywallpaperpath = filePath;
 									// Not showing original wallpaper
@@ -1057,6 +1203,10 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 									bDailyWallpaper = true;
 									// Bypass Spout and Video in Render()
 									bShowDaily = true;
+									// Set timer for every 2 seconds
+									KillTimer(hWndMain, 1);
+									SetTimer(hWndMain, 1, 2000, NULL);
+
 								}
 							}
 							remove(jsonFile.c_str());
@@ -1064,12 +1214,60 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					}
 				}
 				break;
+
+			case IDM_SLIDESHOW:
+			{
+				char path[MAX_PATH]{};
+				char name[MAX_PATH]{};
+				strcpy_s(path, MAX_PATH, g_slideshowpath); // starting folder
+				if (OpenFolder(path, MAX_PATH)) {
+					slidenames.clear();
+					if (GetImageFiles(path, slidenames) > 0) {
+						// Allow selection of slide duration
+						if (SelectSlideDuration()) {
+							// Close video
+							CloseVideo();
+							// Close receiver
+							receiver.ReleaseReceiver();
+							// Disable daily wallpaper display
+							bShowDaily = false;
+							// Save selected folder
+							strcpy_s(g_slideshowpath, MAX_PATH, path);
+							// Write to the registry for the next start
+							WritePathToRegistry(HKEY_CURRENT_USER, "Software\\Leading Edge\\SpoutWallpaper", "slideshowfolder", g_slideshowpath);
+							// TODO - user select slide time
+							WriteDwordToRegistry(HKEY_CURRENT_USER, "Software\\Leading Edge\\SpoutWallpaper", "slideshowtime", g_slideshowtime);
+							// Reset counter and timer
+							nCurrentImage = 0;
+							// Set start time
+							g_start = ElapsedMicroseconds()/1000.0;
+							// Set timer for every 1 second
+							KillTimer(hWndMain, 1);
+							SetTimer(hWndMain, 1, 1000, NULL);
+						}
+						else {
+							slidenames.clear();
+							nCurrentImage = 0;
+							g_start = 0.0;
+						}
+					}
+					else {
+						SpoutMessageBox(NULL, "No image files in the folder", "SpoutWallPaper", MB_ICONWARNING | MB_OK);
+					}
+				}
+				else {
+					slidenames.clear();
+					nCurrentImage = 0;
+					g_start = 0.0;
+				}
+			}
+			break;
 		
 			case IDM_ABOUT:
 			{
 				HICON hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_STEALTHDLG));
 				SpoutMessageBoxIcon(hIcon);
-				std::string str = "Version 1.000\n\nChange Windows wallpaper\nSpout sender, video, image, Bing daily.\n\n";
+				std::string str = "Version 1.003\n\nChange Windows wallpaper\nSpout sender, video, image, Bing daily, slideshow.\n\n";
 				str +=	"<a href=\"https://spout.zeal.co/\">https://spout.zeal.co/</a>\n";
 				if (!copyright.empty()) {
 					str += "\nWallpaper image\n";
@@ -1097,6 +1295,118 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		PostQuitMessage(0);
 		break;
 	}
+	return 0;
+}
+
+
+// Select slide duration aft selecting folder
+bool SelectSlideDuration()
+{
+	// 2, 4, 10, 30 seconds
+	// 1, 2,  4, 10 minutes
+	// 1, 2,  5, 10 hours
+	switch (g_slideshowtime) { // seconds
+		case     2: durationindex =  0; break; //  2 seconds
+		case     4: durationindex =  1; break; //  4 seconds
+		case    10: durationindex =  2; break; // 10 seconds
+		case    30: durationindex =  3; break; // 30 seconds
+		case    60: durationindex =  4; break; //  1 minute
+		case   120: durationindex =  5; break; //  2 minutes
+		case   240: durationindex =  6; break; //  4 minutes
+		case   600: durationindex =  7; break; // 10 minutes
+		case  1800: durationindex =  8; break; // 30 minutes
+		case  3600: durationindex =  9; break; //  1 hour (60 minutes)
+		case  7200: durationindex = 10; break; //  2 hours
+		case 14400: durationindex = 11; break; //  4 hours
+		case 36000: durationindex = 12; break; // 10 hours
+		default: break;
+	}
+	// Show the dialog box 
+	if((int)DialogBoxA(hInst, MAKEINTRESOURCEA(IDD_DURATIONBOX), g_hWnd, (DLGPROC)SlideDuration) != 0) {
+		// OK - new duration has been selected
+		g_slideshowtime = (DWORD)duration[durationindex]; // seconds
+		return true;
+	}
+
+	return false;
+
+}
+
+// Message handler for slide duration selection
+INT_PTR CALLBACK SlideDuration(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	UNREFERENCED_PARAMETER(lParam);
+	HWND hwndList = NULL;
+	char formats[13][128] = { "2 seconds", "4 seconds", "10 seconds", "30 seconds", "1 minute", "2 minutes", "4 minutes", "10 minutes", "30 minutes", "1 hour", "2 hours", "4 hours", "10 hours" };
+
+	switch (message) {
+
+	case WM_INITDIALOG:
+		SetWindowTextA(hDlg, "Slide duration");
+		hwndList = GetDlgItem(hDlg, IDC_SLIDE_DURATION);
+		SendMessageA(hwndList, (UINT)CB_RESETCONTENT, 0, 0L);
+		for (int k = 0; k < 13; k++)
+			SendMessageA(hwndList, (UINT)CB_ADDSTRING, 0, (LPARAM)formats[k]);
+		SendMessageA(hwndList, CB_SETCURSEL, (WPARAM)durationindex, (LPARAM)0);
+
+		// Random
+		if (bRandom)
+			CheckDlgButton(hDlg, IDC_SLIDE_RANDOM, BST_CHECKED);
+		else
+			CheckDlgButton(hDlg, IDC_SLIDE_RANDOM, BST_UNCHECKED);
+
+		return (INT_PTR)TRUE;
+
+	case WM_COMMAND:
+		// Combo box selection
+		if (HIWORD(wParam) == CBN_SELCHANGE) {
+			if ((HWND)lParam == GetDlgItem(hDlg, IDC_SLIDE_DURATION)) {
+				durationindex = static_cast<unsigned int>(SendMessageA((HWND)lParam, (UINT)CB_GETCURSEL, (WPARAM)0, (LPARAM)0));
+			}
+		}
+
+
+		// Drop though if not selected
+		switch (LOWORD(wParam)) {
+		case IDOK:
+			// Random slides 
+			if (IsDlgButtonChecked(hDlg, IDC_SLIDE_RANDOM) == BST_CHECKED)
+				bRandom = true;
+			else
+				bRandom = false;
+			EndDialog(hDlg, 1);
+			return (INT_PTR)TRUE;
+		case IDCANCEL:
+			EndDialog(hDlg, 0);
+			return (INT_PTR)TRUE;
+		default:
+			return (INT_PTR)FALSE;
+		}
+		break;
+	}
+
+	return (INT_PTR)FALSE;
+}
+
+
+// Used by the OpenFolder function to choose a folder
+INT CALLBACK BrowseCallbackProc(HWND hwnd, UINT uMsg, LPARAM lp, LPARAM pData)
+{
+	TCHAR szDir[MAX_PATH];
+	TCHAR initialDir[MAX_PATH];
+
+	mbstowcs_s(NULL, &initialDir[0], MAX_PATH, &startingfolder[0], MAX_PATH);
+
+	switch (uMsg)
+	{
+	case BFFM_INITIALIZED:
+		_tcscpy_s(szDir, MAX_PATH, initialDir);
+		// Not working for modern interface
+		SendMessage(hwnd, BFFM_SETEXPANDED, TRUE, (LPARAM)szDir);
+		SendMessage(hwnd, BFFM_SETSELECTION, TRUE, (LPARAM)szDir);
+		break;
+	}
+
 	return 0;
 }
 
