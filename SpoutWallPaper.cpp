@@ -86,6 +86,8 @@
 //				 - Add slideshow option with image path, slide duration and random change
 //		12.03.24 - Update slide image details for About and Exit
 //		17.03.24 - Version 1.003
+//		23.03.24 - Correct daily image displayed when sender changed
+//				   Version 1.004
 //
 
 #include "stdafx.h"
@@ -192,10 +194,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	HACCEL hAccelTable = NULL;
 
 	// Console window so printf works
+	/*
 	FILE* pCout;
 	AllocConsole();
 	freopen_s(&pCout, "CONOUT$", "w", stdout); 
 	printf("SpoutWallPaper\n");
+	// Disable console close button to prevent accidental shutdown
+	HMENU hmenu = GetSystemMenu(GetConsoleWindow(), FALSE);
+	EnableMenuItem(hmenu, SC_CLOSE, MF_GRAYED);
+	*/
 
 	// Try to open the application mutex
 	g_hMutex = OpenMutexA(MUTEX_ALL_ACCESS, 0, "SpoutWallpaper");
@@ -385,7 +392,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		SpoutMessageBoxIcon(hIcon);
 		std::string confirm = " ";
 		if (!copyright.empty()) confirm += copyright;
-		if(SpoutMessageBox(NULL, confirm.c_str(), " ", MB_USERICON | MB_YESNO, "Keep new wallpaper ?") == IDYES) {
+		if(SpoutMessageBox(NULL, confirm.c_str(), " ", MB_USERICON | MB_YESNO, "Keep new image as wallpaper ?") == IDYES) {
 			g_wallpaperpath.clear();
 		}
 	}
@@ -407,8 +414,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 void Render()
 {
 	// No rendering for wallpaper image
-	if (bShowDaily)
+	if (bShowDaily) {
 		return;
+	}
 	
 	if (!slidenames.empty() && g_start > 0.0) {
 
@@ -485,17 +493,26 @@ void Render()
 			}
 		}
 		else {
+
 			// Because SetReceiverName is used to select the sender,
 			// the receiver waits for that sender to re-open.
 			// Here we need to test to find if it was closed.
-			if (!receiver.sendernames.hasSharedInfo(receiver.GetSenderName()))
+			if (!receiver.sendernames.hasSharedInfo(receiver.GetSenderName())) {
+
 				// Clear the receiver name
 				receiver.SetReceiverName();
 
-			if (g_pixelBuffer) {
-				receiver.ReleaseReceiver();
-				delete[] g_pixelBuffer;
-				g_pixelBuffer = nullptr;
+				if (g_pixelBuffer) {
+					receiver.ReleaseReceiver();
+					delete[] g_pixelBuffer;
+					g_pixelBuffer = nullptr;
+				}
+
+				// Return now if there is there another sender
+				if (receiver.GetSenderCount() > 0) {
+					return;
+				}
+
 			}
 
 			// If a daily wallpaper has been downloaded, show it
@@ -507,6 +524,7 @@ void Render()
 				// Otherwise restore wallpaper
 				RestoreWallPaper();
 			}
+
 		} // endif ReceiveImage
 	}
 	else {
@@ -1054,7 +1072,10 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			// Clear slideshow
 			slidenames.clear();
 			// Disable daily wallpaper display
+			// Do not bypass  Spout and Video in Render()
 			bShowDaily = false;
+			// Not showing original wallpaper
+			bCurrentWallpaper = false;
 			// Set timer for 30 msec
 			KillTimer(hWndMain, 1);
 			SetTimer(hWndMain, 1, 30, NULL);
@@ -1267,7 +1288,7 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			{
 				HICON hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_STEALTHDLG));
 				SpoutMessageBoxIcon(hIcon);
-				std::string str = "Version 1.003\n\nChange Windows wallpaper\nSpout sender, video, image, Bing daily, slideshow.\n\n";
+				std::string str = "Version 1.004\n\nChange Windows wallpaper\nSpout sender, video, image, Bing daily, slideshow.\n\n";
 				str +=	"<a href=\"https://spout.zeal.co/\">https://spout.zeal.co/</a>\n";
 				if (!copyright.empty()) {
 					str += "\nWallpaper image\n";

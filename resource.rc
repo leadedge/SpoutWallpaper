@@ -51,8 +51,8 @@ IDI_STEALTHDLG     ICON           "SpoutLogo4.ico"
 // Version Information resources
 //
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1, 0, 0, 3
-PRODUCTVERSION  1, 0, 0, 3
+FILEVERSION     1, 0, 0, 4
+PRODUCTVERSION  1, 0, 0, 4
 FILEOS          VOS_NT
 FILETYPE        VFT_APP
 FILESUBTYPE     VFT2_UNKNOWN
@@ -64,8 +64,8 @@ FILEFLAGS       0
         BLOCK "080904E4"
         {
             VALUE "CompanyName", "Leading Edge Pty. Ltd.\0"
-                VALUE "FileVersion", "1.003\0"
-                VALUE "ProductVersion", "1.003\0"
+                VALUE "FileVersion", "1.004\0"
+                VALUE "ProductVersion", "1.004\0"
                 VALUE "LegalCopyright", "Copyright \251 2024 Lynn Jarvis\0"
                 VALUE "FileDescription", "SpoutWallPaper\0"
                 VALUE "InternalName", "SpoutWallPaper\0"
