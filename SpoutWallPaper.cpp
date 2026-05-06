@@ -50,7 +50,7 @@
 //
 // =========================================================================
 //
-//               Copyright(C) 2024 Lynn Jarvis.
+//               Copyright(C) 2024-2026 Lynn Jarvis.
 //               https://www.spout.zeal.co
 //
 // This program is free software : you can redistribute it and/or modify
@@ -89,12 +89,58 @@
 //		23.03.24 - Correct daily image displayed when sender changed
 //				   Version 1.004
 //
-
+//		========== Review and Revision for Windows 11 ==========
+//
+//		24.04.26   Sort slideshow images by write time
+//				   Revise slideshow timing
+//				   Prevent immediate repeats if random
+//				   Calculate random index only if image number > 1
+//		25.04.26 - Unicode/Multibyte compatible
+//				     Change szTitle and szWindowClass from WCHAR to char
+//				     Change from LoadStringW to LoadstringA
+//				     BrowseCallbackProc
+//				      change mbstowcs_s to strcpy_s
+//				      BFFM_INITIALIZED - change _tcscpy_s to strcpy_s
+//		26.04.26 - Set initial folder for BrowseCallbackProc as info.lParam
+//				   Add "Show details" for on-screen details
+//				   Add "More information" to Bing daily About
+//				   Look for FFmpeg only for video
+//		27.04.26 - OpenFolder
+//				     Check that starting folder exists
+//				     Return if dialog is already open (bBrowseOpen flag)
+//				   BrowseCallbackProc
+//				     Keep browse dialog topmost
+//				     Check again if folder exists before BFFM_SETSELECTIONA
+//				     Sleep to allow the dialog to scroll
+//		28.04.26 - OpenFile - set initial folder from filename passed in
+//		30.04.26 - Add "GetWallpaperWindow" function to find worker window
+//				   for compatibility with Windows 11 and Windows 10
+//				   Add ValidateWorker, FindFFmpeg functions
+//				   Add WM_TASKBARCREATED and WM_DISPLAYCHANGE
+//				   to handle explorer reset, scaling changes and more
+//		01.05.26 - Pop up a messagebox briefly when the program starts
+//				   Set initial slideshow path to wallpaper image path if not selected yet
+//				   Release receiver if sender is re-selected
+//		02.05.26 - Use std::filesystem to create new folders
+//				   C++17 necessary in the project properties
+//				   Properties > C/C++ > Language > C++ Language Standard
+//		03.05.26 - Use GetExePath to get executable path with backslash 
+//				   Used by URLDownloadToFileA and SystemParametersInfoA
+//		04.05.26 - Rename Change global slide duration index to g_slidedurationindex
+//				   Remove switch to convert time to index
+//				   Local durations within SelectSlideDuration
+//		05.05.26 - Add "AddTrayIcon" for re-use with Explorer restart
+//				   Register WM_TASKBARCREATED in setup
+//				   Check current wallpaper on exit
+//				   Add not showing the daily wallpaper to slideshow
+//				   Version 2.000
+//
 #include "stdafx.h"
 #include <windows.h>
 #include <stdio.h> // for printf if used
 #include <shlobj.h>
 #include <commdlg.h> // for explorer dialog
+#include <filesystem> // For creating a folder (needs C++17 standard)
 #include "..\..\SpoutDirectX\SpoutDX\SpoutDX.h"
 #include "resource.h"
 
@@ -106,6 +152,8 @@
 #include <Urlmon.h>
 #pragma comment (lib, "Urlmon.lib")
 
+namespace fs = std::filesystem; // For creating a folder
+
 #define TRAYICONID	1        // ID number for the Notify Icon
 #define SWM_TRAYMSG	WM_APP   // The message ID sent to our window
 #define SWM_EXIT WM_APP + 13 // Close the window
@@ -115,13 +163,14 @@
 HINSTANCE hInst = NULL;  // current instance
 NOTIFYICONDATA niData{}; // notify icon data
 HWND hWndMain = NULL;
-HANDLE g_hMutex = NULL;                // Application mutex
-WCHAR szTitle[MAX_LOADSTRING]{};       // title bar text
-WCHAR szWindowClass[MAX_LOADSTRING]{}; // main window class name
+HANDLE g_hMutex = NULL;               // Application mutex
+char szTitle[MAX_LOADSTRING]{};       // title bar text
+char szWindowClass[MAX_LOADSTRING]{}; // main window class name
+bool bBrowseOpen = false;             // Browse dialog open
 
 // Variables to enumerate Spout senders
 spoutDX spout;
-SharedTextureInfo info;
+SharedTextureInfo info{};
 std::set<std::string> Senders;
 std::set<std::string>::iterator iter;
 std::string namestring;
@@ -133,8 +182,13 @@ HWND g_hWnd = NULL;                     // Window handle
 unsigned char* g_pixelBuffer = nullptr; // Receiving pixel buffer
 unsigned int g_SenderWidth = 0;         // Received sender width
 unsigned int g_SenderHeight = 0;        // Received sender height
-HWND g_WorkerHwnd = NULL;               // Worker window handle
-void Render();
+
+// For wallpaper
+HWND g_WorkerHwnd = NULL; // Worker window handle
+HWND GetWallpaperWindow();
+bool ValidateWorker();
+void RestoreWallPaper();
+BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam);
 
 // For the Bing daily wallpaper image
 std::string g_wallpaperpath;      // Current wallpaper image
@@ -142,13 +196,13 @@ bool bCurrentWallpaper = false;   // Showing current wallpaper
 std::string g_dailywallpaperpath; // Daily wallpaper image
 bool bDailyWallpaper = false;     // Downloaded daily wallpaper
 bool bShowDaily = false;          // Showing daily wallpaper
+bool bShowDetails = true;         // Show details on wallpaper
 std::string copyright;            // Description for about and exit
+std::string imagepage;            // Web page of the image
 
 // For slideshow
 bool bSlideShow = false;
-bool OpenFolder(char* filepath, int maxchars);
 char g_slideshowpath[MAX_PATH]{}; // Slideshow folder
-char startingfolder[MAX_PATH]{}; // Initial browse dialog folder
 int nCurrentImage = 0;
 DWORD g_slideshowtime = 30; // Seconds per frame
 double g_start = 0.0; // Start time
@@ -157,7 +211,7 @@ int GetImageFiles(const char* spath, std::vector<std::string>& filenames);
 
 // For FFmpeg video player
 std::string g_videopath;            // The full video path
-unsigned char g_SenderName[256]={}; // Sender name
+unsigned char g_SenderName[256]{};  // Sender name
 float g_FrameRate = 30.0f;          // Video frame rate
 double g_SenderFps = 0.0;           // For fps display averaging
 std::string g_exePath;              // Executable location
@@ -170,31 +224,43 @@ BOOL InitInstance(HINSTANCE, int);
 BOOL OnInitDialog(HWND hWnd);
 void ShowContextMenu(HWND hWnd);
 ULONGLONG GetDllVersion(LPCTSTR lpszDllName);
-void RestoreWallPaper();
+void Render(); // Main render function
 bool OpenVideo(std::string filePath);
 void CloseVideo();
 bool OpenFile(char* filepath, int maxchars, bool bVideo = false);
 bool ffprobe(std::string videoPath);
+// Message sent when the taskbar is created
+static UINT WM_TASKBARCREATED = 0;;
 INT_PTR CALLBACK DlgProc(HWND, UINT, WPARAM, LPARAM);
 
 // Slide duration
 bool SelectSlideDuration();
 static INT_PTR CALLBACK SlideDuration(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
-static int durationindex = 0; // for the combobox
-static int duration[13]= { 2, 4, 10, 30, 60, 120, 240, 600, 1800, 3600, 7200, 14400, 36000 }; // seconds
+static int g_slidedurationindex = 0; // static for the combobox
 static bool bRandom = false;
-
 // For folder selection
 INT CALLBACK BrowseCallbackProc(HWND hwnd, UINT uMsg, LPARAM lp, LPARAM pData);
-BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam);
+
+// Draw image details on screen
+void DrawString(std::string str);
+// Look for FFmpeg
+bool FindFFmpeg();
+// Simulate a key press (used in OpenFolder)
+void PressKey(WORD key);
+// Browse for a folder
+bool OpenFolder(char* filepath, int maxchars);
+// Tray icon management
+void AddTrayIcon(HINSTANCE hinst, HWND hwnd);
+
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
 	MSG msg{};
 	HACCEL hAccelTable = NULL;
-
-	// Console window so printf works
+	
 	/*
+	// ============================================
+	// Console window so printf works for debugging
 	FILE* pCout;
 	AllocConsole();
 	freopen_s(&pCout, "CONOUT$", "w", stdout); 
@@ -202,52 +268,55 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// Disable console close button to prevent accidental shutdown
 	HMENU hmenu = GetSystemMenu(GetConsoleWindow(), FALSE);
 	EnableMenuItem(hmenu, SC_CLOSE, MF_GRAYED);
+	// ==============================================
 	*/
 
 	// Try to open the application mutex
 	g_hMutex = OpenMutexA(MUTEX_ALL_ACCESS, 0, "SpoutWallpaper");
 	// If it exists, don't open again
 	if (g_hMutex) {
-		SpoutMessageBox("SpoutWallpaper is already running");
+		// Use a custom warning icon (79) to avoid a notification sound
+		// https://renenyffenegger.ch/development/Windows/PowerShell/examples/WinAPI/ExtractIconEx/imageres.html
+		HICON hIcon = nullptr;
+		ExtractIconExA("%SystemRoot%\\system32\\imageres.dll", 79, &hIcon, NULL, 1);
+		SpoutMessageBoxIcon(hIcon);
+		SpoutMessageBox(NULL, "SpoutWallpaper already running", "Warning", MB_OK, 1500);
 		// Close it now, otherwise it is never released
 		CloseHandle(g_hMutex);
 		return 0;
 	}
-
-	// Executable location
-	char exePath[MAX_PATH]={};
-	GetModuleFileNameA(NULL, exePath, MAX_PATH); // Full path of the executable
-	PathRemoveFileSpecA(exePath);
-	g_exePath = exePath;
-
-	// Look for FFmpeg
-	g_ffmpegPath = g_exePath;
-	g_ffmpegPath += "\\DATA\\FFMPEG\\ffmpeg.exe";
-	// Look for FFprobe.exe
-	std::string ffpath = g_exePath;
-	ffpath += "\\DATA\\FFMPEG\\ffprobe.exe";
-	// Location should be : \DATA\FFMPEG
-	if (_access(g_ffmpegPath.c_str(), 0) == -1 || _access(ffpath.c_str(), 0) == -1) {
-		std::string str = "o Go to <a href=\"https://github.com/GyanD/codexffmpeg/releases/\">https://github.com/GyanD/codexffmpeg/releases/</a>\n";
-		str += "o Choose the \"Essentials\" build. e.g.ffmpeg-5.1.2-essentials_build.zip\n";
-		str += "o Download and unzip the archive\n";
-		str += "o Copy bin\\FFmpeg.exe and bin\\FFprobe.exe to : DATA\\FFMPEG";
-		SpoutMessageBox("FFmpeg not found", str.c_str(), MB_OK | MB_TOPMOST);
-		if (g_hMutex) ReleaseMutex(g_hMutex);
-		return 0;
+	else {
+		g_hMutex = CreateMutexA(0, 0, "SpoutWallpaper");
 	}
 
+	// Executable location
+	// Note : the path has a trailing backslash
+	g_exePath = GetExePath();
+
+	// Check for FFmpeg only if using video
+
+	// Message sent when the taskbar is created (see dlgProc)
+	// This is not a pre-defined Windows message and must be registered
+	WM_TASKBARCREATED = RegisterWindowMessage(L"TaskbarCreated");
+
 	// Get the current wallpaper to restore if changed
+	g_wallpaperpath.clear();
+	bCurrentWallpaper = false;
 	char path[MAX_PATH]{};
 	if (SystemParametersInfoA(SPI_GETDESKWALLPAPER, MAX_PATH, (void*)path, 0)) {
-		g_wallpaperpath = path;
-		bCurrentWallpaper = true;
+		// Does the image exist?
+		if(_access(path, 0) != -1) {
+			g_wallpaperpath = path;
+			bCurrentWallpaper = true;
+		}
+		else {
+			SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (PVOID)"", SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+		}
 	}
 
 	// Get the last slideshow path and slide time
 	ReadPathFromRegistry(HKEY_CURRENT_USER, "Software\\Leading Edge\\SpoutWallpaper", "slideshowfolder", g_slideshowpath);
 	ReadDwordFromRegistry(HKEY_CURRENT_USER, "Software\\Leading Edge\\SpoutWallpaper", "slideshowtime", &g_slideshowtime);
-
 
 	//
 	// Optional command line : SpoutWallPaper "video name"
@@ -260,68 +329,52 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// If no command line, a Spout sender is detected if running
 	//
 	if (lpCmdLine && *lpCmdLine) {
-		std::string videoname = lpCmdLine;
-		// Remove double quotes
-		videoname.erase(std::remove(videoname.begin(), videoname.end(), '"'), videoname.end());
-		// Remove trailing spaces
-		size_t pos = videoname.find_last_not_of("\n");
-		videoname = (pos == std::string::npos) ? "" : videoname.substr(0, pos + 1);
-		// Remove preceding backslash
-		pos = videoname.find_first_of("\\");
-		if (pos != std::string::npos && pos == 0) {
-			videoname = videoname.substr(pos+1);
-		}
+		if (FindFFmpeg()) {
+			std::string videoname = lpCmdLine;
+			// Remove double quotes
+			videoname.erase(std::remove(videoname.begin(), videoname.end(), '"'), videoname.end());
+			// Remove trailing spaces
+			size_t pos = videoname.find_last_not_of("\n");
+			videoname = (pos == std::string::npos) ? "" : videoname.substr(0, pos + 1);
+			// Remove preceding backslash
+			pos = videoname.find_first_of("\\");
+			if (pos != std::string::npos && pos == 0) {
+				videoname = videoname.substr(pos + 1);
+			}
 
-		if (PathFileExistsA(videoname.c_str())) {
-			// Full fath found
-			g_videopath = videoname;
-		}
-		else {
-			// Try the executable folder
-			g_videopath = g_exePath;
-			g_videopath += "\\";
-			g_videopath += videoname;
-			if (!PathFileExistsA(g_videopath.c_str())) {
-				// Try the DATA\Video folder
+			if (PathFileExistsA(videoname.c_str())) {
+				// Full fath found
+				g_videopath = videoname;
+			}
+			else {
+				// Try the executable folder
 				g_videopath = g_exePath;
-				g_videopath += "\\DATA\\Videos\\";
+				g_videopath += "\\";
 				g_videopath += videoname;
 				if (!PathFileExistsA(g_videopath.c_str())) {
-					// The path does not exist
-					g_videopath.clear();
+					// Try the DATA\Video folder
+					g_videopath = g_exePath;
+					g_videopath += "DATA\\Videos\\";
+					g_videopath += videoname;
+					if (!PathFileExistsA(g_videopath.c_str())) {
+						// The path does not exist
+						g_videopath.clear();
+					}
 				}
 			}
 		}
 	}
 
 	// Initialize global strings
-	LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-	LoadStringW(hInstance, IDC_LIVE_WALLPAPER, szWindowClass, MAX_LOADSTRING);
+	LoadStringA(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
+	LoadStringA(hInstance, IDC_LIVE_WALLPAPER, szWindowClass, MAX_LOADSTRING);
 
-	// Find the existing worker window and close it
-	HWND hWorker = NULL;
-	EnumWindows(EnumWindowsProc, (LPARAM)&hWorker);
-	if (hWorker) {
-		HWND hWnd = FindWindowEx(hWorker, NULL, szWindowClass, NULL);
-		if (hWnd) {
-			PostMessage(hWnd, WM_CLOSE, 0, 0);
-		}
-	}
-
-	// Find the Program Manager window
-	HWND progman = FindWindow(L"Progman", NULL);
-
-	// Send message 0x052C to Progman which directs it to spawn a WorkerW 
-	// behind the desktop icons. The message is ignored if the window already exists.
-	SendMessageTimeout(progman, 0x052C, NULL, NULL, SMTO_NORMAL, 1000, NULL);
-
-	// Enumerate all Windows, until one has the SHELLDLL_DefView as a child. 
-	// If found, take its next sibling and assign it to workerw.
-	hWorker = NULL;
-	EnumWindows(EnumWindowsProc, (LPARAM)&hWorker);
+	// Find the worker window
+	HWND hWorker = GetWallpaperWindow();
 	if (!hWorker) {
-		RestoreWallPaper();
 		if (g_hMutex) ReleaseMutex(g_hMutex);
+		g_hMutex = NULL;
+		MessageBoxA(NULL, "Could not get worker window", "Warning", MB_OK | MB_ICONWARNING);
 		return 0;
 	}
 
@@ -330,7 +383,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	// Application initialization
 	if (!InitInstance(hInstance, nCmdShow)) {
+		SpoutMessageBox("Could not initialize SpoutWallpaper");
 		if (g_hMutex) ReleaseMutex(g_hMutex);
+		g_hMutex = NULL;
 		return 0;
 	}
 
@@ -344,8 +399,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// Initialize DirectX
 	// A device is created in the SpoutDX class.
 	if (!receiver.OpenDirectX11()) {
-		RestoreWallPaper();
+		SpoutMessageBox("Could not open DirectX 11");
 		if (g_hMutex) ReleaseMutex(g_hMutex);
+		g_hMutex = NULL;
 		return 0;
 	}
 
@@ -363,6 +419,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// Set low priority
 	SetPriorityClass(hProcess, IDLE_PRIORITY_CLASS);
 
+	// The app is hidden in the system tray and might seem to not work
+	// Pop up a messagebox so it is clear that it has started
+	// Use a custom information icon (77) to avoid a notification sound
+	HICON hIcon = nullptr;
+	ExtractIconExA("%SystemRoot%\\system32\\imageres.dll", 76, &hIcon, NULL, 1);
+	SpoutMessageBoxIcon(hIcon);
+	SpoutMessageBox(NULL, "SpoutWallpaper 2.000", "Moving to the System Tray", MB_OK, 1500);
+	
 	// Main message loop:
 	while (GetMessage(&msg, NULL, 0, 0)) {
 		if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg)||
@@ -373,9 +437,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		}
 		if(msg.wParam != WM_QUIT)
 			Render();
-
 		Sleep(1); // Reduces CPU load
-
 	}
 
 	KillTimer(hWndMain, 1);
@@ -386,14 +448,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// Release the receiver
 	receiver.ReleaseReceiver();
 
-	// Restore the starting wallpaper unless it was changed and should be retained
+	// Restore the starting wallpaper
+	// If changed, prompt to keep the new image
 	if (bDailyWallpaper && !g_wallpaperpath.empty()) {
-		HICON hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_STEALTHDLG));
-		SpoutMessageBoxIcon(hIcon);
-		std::string confirm = " ";
-		if (!copyright.empty()) confirm += copyright;
-		if(SpoutMessageBox(NULL, confirm.c_str(), " ", MB_USERICON | MB_YESNO, "Keep new image as wallpaper ?") == IDYES) {
-			g_wallpaperpath.clear();
+		// g_wallpaperpath is the Starting wallpaper path
+		// Check the current wallpaper
+		char szWallPaper[MAX_PATH]{};
+		SystemParametersInfoA(SPI_GETDESKWALLPAPER, MAX_PATH, (PVOID)szWallPaper, 0);
+		// If different from the original (daily, image or slideshow) prompt to keep it
+		if (g_wallpaperpath != szWallPaper) {
+			HICON hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_STEALTHDLG));
+			SpoutMessageBoxIcon(hIcon);
+			std::string confirm = " ";
+			if (!copyright.empty()) confirm += copyright;
+			if (SpoutMessageBox(NULL, confirm.c_str(), " ", MB_USERICON | MB_YESNO, "Keep new image as wallpaper ?") == IDYES) {
+				g_wallpaperpath.clear();
+			}
+		}
+		else {
+			// If changed back to the original, clear the daily wallpaper flag
+			bDailyWallpaper = false;
 		}
 	}
 
@@ -403,7 +477,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	receiver.CloseDirectX11();
 
 	// Release the application mutex so another instance can be opened
-	if (g_hMutex) ReleaseMutex(g_hMutex);
+	if (g_hMutex)
+		ReleaseMutex(g_hMutex);
+
+	// DEBUG
+	// MessageBoxA(NULL, "Finished", "", 0);
+
 
 	return (int) msg.wParam;
 }
@@ -414,18 +493,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 void Render()
 {
 	// No rendering for wallpaper image
-	if (bShowDaily) {
+	if (bShowDaily)
 		return;
-	}
-	
+
+	// Validate Worker window before rendering
+	if (!ValidateWorker())
+		return;
+
 	if (!slidenames.empty() && g_start > 0.0) {
 
 		//
 		// Slideshow
 		//
-
-		// Not showing original wallpaper
-		bCurrentWallpaper = false;
 
 		// Calculate frame time for slide duration
 		double msecs = ElapsedMicroseconds()/1000.0;
@@ -433,32 +512,58 @@ void Render()
 
 		std::string slidepath = g_slideshowpath;
 		slidepath += "\\";
-		if (nCurrentImage == 0 || elapsed > (double)(g_slideshowtime*1000)) { // seconds to msec
-			
-			g_start = msecs;
-			slidepath += slidenames[nCurrentImage];
-			SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)slidepath.c_str(), SPIF_SENDCHANGE);
-			
-			// Not showing original wallpaper
-			bCurrentWallpaper = false;
 
-			// Update details for About and Exit
-			char filepath[MAX_PATH]{};
-			strcpy_s(filepath, slidepath.c_str());
-			PathStripPathA(filepath);
-			copyright = filepath;
-			
-			// Update image index
-			if (bRandom) {
-				nCurrentImage = rand()%(slidenames.size());
+		// Seed the random number generator with the current time
+		// to ensure a random number for the first image
+		srand((unsigned int)time(0)); 
+
+		if (nCurrentImage == 0 || elapsed > (double)(g_slideshowtime * 1000)) { // seconds to msec
+
+			// Calculate slide index first if random
+			if (bRandom && slidenames.size() > 1) {
+				// Prevent immediate repeats
+				int nImage = 0;
+				do {
+					nImage = rand() % (slidenames.size());
+				} while (nImage == nCurrentImage);
+				nCurrentImage = nImage;
 			}
-			else {
+
+			// Re-set start time for next slide
+			g_start = msecs;
+
+			if (nCurrentImage < slidenames.size()) {
+
+				slidepath += slidenames[nCurrentImage];
+				// Set the new wallpaper
+				SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)slidepath.c_str(), SPIF_SENDCHANGE);
+				// Update details for screen display, About and Exit
+				char filepath[MAX_PATH]{};
+				strcpy_s(filepath, slidepath.c_str());
+				PathStripPathA(filepath);
+				copyright = filepath;
+				if (bShowDetails) {
+					// Arbitrary wait for wallpaper before drawing text
+					Sleep(200);
+					DrawString(copyright);
+				}
+
+			}
+
+			// Update image index after the slide if not random
+			if (!bRandom && slidenames.size() > 1) {
 				nCurrentImage++;
-				if (nCurrentImage > slidenames.size()-1)
+				if (nCurrentImage > slidenames.size())
 					nCurrentImage = 0;
 			}
-
 		}
+
+		// Not showing original wallpaper
+		bCurrentWallpaper = false;
+
+		// Not showing the daily wallpaper
+		bDailyWallpaper = false;
+
 		return;
 	}
 
@@ -471,7 +576,8 @@ void Render()
 		// Get pixels from the sender shared texture.
 		// ReceiveImage handles sender detection, creation and update.
 		// Windows bitmaps are bottom-up. Although the rgba pixel buffer can be flipped by
-		// the ReceiveImage function, it can also be drawn upside down as shown further below.
+		// the ReceiveImage function, it can also be drawn upside down in WM_PAINT.
+
 		// Approx 5-8 msec
 		if (receiver.ReceiveImage(g_pixelBuffer, g_SenderWidth, g_SenderHeight)) { // RGB = false, invert = false
 			
@@ -496,7 +602,7 @@ void Render()
 
 			// Because SetReceiverName is used to select the sender,
 			// the receiver waits for that sender to re-open.
-			// Here we need to test to find if it was closed.
+			// Test here to find if it was closed.
 			if (!receiver.sendernames.hasSharedInfo(receiver.GetSenderName())) {
 
 				// Clear the receiver name
@@ -516,13 +622,16 @@ void Render()
 			}
 
 			// If a daily wallpaper has been downloaded, show it
-			if (bDailyWallpaper && !g_wallpaperpath.empty()) {
+			if (bDailyWallpaper && !g_dailywallpaperpath.empty()) {
+				// Set the new wallpaper
 				SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)g_dailywallpaperpath.c_str(), SPIF_SENDCHANGE);
 				bShowDaily = true;
 			}
 			else {
-				// Otherwise restore wallpaper
-				RestoreWallPaper();
+				// Otherwise restore original wallpaper if not being shown
+				if (!g_wallpaperpath.empty() && !bCurrentWallpaper) {
+					RestoreWallPaper();
+				}
 			}
 
 		} // endif ReceiveImage
@@ -608,46 +717,8 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 	}
 	hWndMain = hWnd;
 
-	// Fill the NOTIFYICONDATA structure and call Shell_NotifyIcon
-	ZeroMemory(&niData, sizeof(NOTIFYICONDATA));
-
-	// Get Shell32 version number and set the size of the structure
-	ULONGLONG ullVersion = GetDllVersion(_T("Shell32.dll"));
-
-	if(ullVersion >= MAKEDLLVERULL(5, 0,0,0))
-		niData.cbSize = sizeof(NOTIFYICONDATA);
-	else 
-		niData.cbSize = NOTIFYICONDATA_V2_SIZE;
-
-	// Set the ID number (can be anything)
-	niData.uID = TRAYICONID;
-
-	// State which structure members are valid
-	niData.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; // Must receive messages
-	niData.dwState = 0x00000000; // not hidden
-	niData.dwStateMask = NIS_HIDDEN; // alow only the hidden state to be modified - we have no notifications
-
-	// Load the icon
-	niData.hIcon = (HICON)LoadImage(hInstance,
-									MAKEINTRESOURCE(IDI_STEALTHDLG),
-									IMAGE_ICON, 
-									GetSystemMetrics(SM_CXSMICON),
-									GetSystemMetrics(SM_CYSMICON),
-									LR_DEFAULTCOLOR);
-
-	// The window to send messages to and the message to send.
-	// Note: the message value should be in the range of WM_APP through 0xBFFF.
-	niData.hWnd = hWnd;
-    niData.uCallbackMessage = SWM_TRAYMSG;
-
-	wchar_t  ws[512]{};
-	wsprintf(ws, L"SpoutWallPaper");
-	lstrcpyn(niData.szTip, ws, sizeof(niData.szTip)/sizeof(TCHAR));
-	Shell_NotifyIcon(NIM_ADD, &niData);
-
-	// Free the icon handle
-	if(niData.hIcon && DestroyIcon(niData.hIcon))
-		niData.hIcon = NULL;
+	// Add the tray icon
+	AddTrayIcon(hInst, hWndMain);
 
 	return TRUE;
 }
@@ -686,6 +757,7 @@ void ShowContextMenu(HWND hWnd)
 		if(spout.sendernames.GetSenderNames(&Senders)) {
 			Senders.clear();
 			spout.sendernames.GetSenderNames(&Senders);
+
             // Add all the Sender names as items to the dialog list.
 			if(Senders.size() > 0) {
 				// Get the active Sender name
@@ -709,10 +781,17 @@ void ShowContextMenu(HWND hWnd)
 
 		AppendMenu(hMenu, MF_STRING, IDM_VIDEO, _T("Video"));
 		AppendMenu(hMenu, MF_STRING, IDM_IMAGE, _T("Image"));
-		AppendMenu(hMenu, MF_STRING, IDM_DAILY, _T("Daily"));
 		AppendMenu(hMenu, MF_STRING, IDM_SLIDESHOW, _T("Slideshow"));
+		AppendMenu(hMenu, MF_STRING, IDM_DAILY, _T("Daily"));
+		AppendMenu(hMenu, MF_STRING, IDM_TITLE, _T("Show details"));
+		InsertMenu(hMenu, 8, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
 		AppendMenu(hMenu, MF_STRING, IDM_ABOUT, _T("About"));
 		InsertMenu(hMenu, -1, MF_BYPOSITION, SWM_EXIT, _T("Exit"));
+
+		if(bShowDetails)
+			CheckMenuItem(hMenu, IDM_TITLE, MF_BYCOMMAND | MF_CHECKED);
+		else
+			CheckMenuItem(hMenu, IDM_TITLE, MF_BYCOMMAND | MF_UNCHECKED);
 
 		// Note: must set window to the foreground
 		// or the menu won't disappear when it should
@@ -740,8 +819,8 @@ ULONGLONG GetDllVersion(LPCTSTR lpszDllName)
         pDllGetVersion = (DLLGETVERSIONPROC)GetProcAddress(hinstDll, "DllGetVersion");
 
         if(pDllGetVersion) {
-            DLLVERSIONINFO dvi;
-            HRESULT hr;
+			DLLVERSIONINFO dvi{};
+            HRESULT hr = 0;
             ZeroMemory(&dvi, sizeof(dvi));
             dvi.cbSize = sizeof(dvi);
             hr = (*pDllGetVersion)(&dvi);
@@ -751,22 +830,6 @@ ULONGLONG GetDllVersion(LPCTSTR lpszDllName)
         FreeLibrary(hinstDll);
     }
     return ullVersion;
-}
-
-void RestoreWallPaper()
-{
-	// Get the current wallpaper if not already
-	if (g_wallpaperpath.empty()) {
-		char szWallPaper[MAX_PATH]{};
-		SystemParametersInfoA(SPI_GETDESKWALLPAPER, MAX_PATH, (PVOID)szWallPaper, 0);
-		if (szWallPaper) g_wallpaperpath = szWallPaper;
-	}
-
-	// Restore original wallpaper if not being shown
-	if (!g_wallpaperpath.empty() && !bCurrentWallpaper) {
-		SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (PVOID)g_wallpaperpath.c_str(), SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE);
-		bCurrentWallpaper = true;
-	}
 }
 
 
@@ -815,7 +878,6 @@ bool OpenVideo(std::string filePath)
 	else {
 		MessageBoxA(NULL, "FFmpeg open failed", "Warning", MB_OK | MB_TOPMOST);
 	}
-
 	return false;
 }
 
@@ -837,13 +899,17 @@ void CloseVideo()
 // Dialog to open video or image file
 bool OpenFile(char* filepath, int maxchars, bool bVideo)
 {
-	OPENFILENAMEA ofn;
+	OPENFILENAMEA ofn{};
 	char szFile[MAX_PATH] = "";
 	char szDir[MAX_PATH] = "";
 
 	ZeroMemory(&ofn, sizeof(ofn));
 	ofn.lStructSize = sizeof(ofn);
 	ofn.hwndOwner = NULL; // TODO hwnd;
+
+	// Initial folder
+	std::string dirstr = filepath;
+	dirstr = GetPath(filepath);
 
 	// Show the user the existing file in the FileOpen dialog
 	if (filepath[0]) {
@@ -858,6 +924,7 @@ bool OpenFile(char* filepath, int maxchars, bool bVideo)
 		ofn.lpstrFilter = "jpg(*.jpg)\0 *.jpg\0png(*.png)\0 *.png\0bmp(*.bmp)\0 *.bmp\0All Files (*.*)\0*.*\0";
 	ofn.lpstrDefExt = "";
 	ofn.lpstrFile = szFile;
+	ofn.lpstrInitialDir = dirstr.c_str();
 	ofn.nMaxFile = MAX_PATH;
 	ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
 	if (GetOpenFileNameA(&ofn)) {
@@ -869,27 +936,80 @@ bool OpenFile(char* filepath, int maxchars, bool bVideo)
 
 }
 
+// Used by the OpenFolder function to choose a folder
+INT CALLBACK BrowseCallbackProc(HWND hwnd, UINT uMsg, LPARAM lp, LPARAM lpData)
+{
+	char initialDir[MAX_PATH]{};
+	// lpData contains the path to set as initial folder
+	strcpy_s(initialDir, reinterpret_cast<const char*>(lpData));
+	switch (uMsg) {
+		case BFFM_INITIALIZED:
+			// Not working for modern interface
+			// SendMessage(hwnd, BFFM_SETEXPANDED, TRUE, (LPARAM)initialDir);
+			if (_access(initialDir, 0) != -1) {
+				// Set initial folder
+				// Must be BFFM_SETSELECTIONA, not BFFM_SETSELECTION
+				SendMessage(hwnd, BFFM_SETSELECTIONA, TRUE, (LPARAM)initialDir);
+				// Sleep is needed to allow the dialog to scroll
+				Sleep(500);
+			}
+			// Keep the dialog topmost
+			SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+			break;
+		default:
+			break;
+	}
+	return 0;
+}
+
+// Simulate a key press (used in OpenFolder)
+void PressKey(WORD key)
+{
+    INPUT input = {0};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = key;
+    SendInput(1, &input, sizeof(INPUT));
+    // Key release
+    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &input, sizeof(INPUT));
+}
 
 // Dialog to select a slideshow folder
 bool OpenFolder(char* filepath, int maxchars)
 {
+	// Return is the browse dialog open
+	if (bBrowseOpen)
+		return false;
+
 	char szDir[MAX_PATH]{};
 	BROWSEINFOA bInfo{};
-	bInfo.hwndOwner = NULL; // Owner window
+	bInfo.hwndOwner = g_hWnd; // Owner window
 	bInfo.pidlRoot = NULL;
 	bInfo.pszDisplayName = szDir; // Address of a buffer to receive the display name of the folder selected by the user
 	bInfo.lpszTitle = "Select a folder for slideshow images"; // Title of the dialog
 	bInfo.ulFlags = 0;
 	bInfo.lpfn = BrowseCallbackProc;
-	bInfo.lParam = 0;
+	// Does the folder exist?
+	if (filepath && _access(filepath, 0) != -1)
+		bInfo.lParam = (LPARAM)filepath; // Starting folder for Browse
+	else
+		bInfo.lParam = NULL;
 	bInfo.iImage = -1;
-	// Larger dialog but does not scroll to selected folder
-	// bInfo.ulFlags = BIF_NEWDIALOGSTYLE | BIF_NONEWFOLDERBUTTON; // Larger dialog
+	bInfo.ulFlags = BIF_NEWDIALOGSTYLE | BIF_NONEWFOLDERBUTTON; // Modern larger dialog
 
-	// Set starting folder for Browse
-	strcpy_s(startingfolder, MAX_PATH, filepath);
+	// Required for the modern dialog to scroll to selected folder
+	//   TAB 1 > moves focus into the tree view
+	//   TAB 2 > ensures the control is active
+	//   RIGHT > expands or interacts with the selected node
+    PressKey(VK_TAB); Sleep(50);
+	PressKey(VK_TAB); Sleep(50);
+	PressKey(VK_RIGHT); Sleep(50);
 
+	bBrowseOpen = true;
 	LPITEMIDLIST lpItem = SHBrowseForFolderA(&bInfo);
+	bBrowseOpen = false;
+
 	if (lpItem != NULL) {
 		SHGetPathFromIDListA(lpItem, szDir);
 		strcpy_s(filepath, maxchars, szDir);
@@ -907,7 +1027,7 @@ bool ffprobe(std::string videoPath)
 	// Use a batch file with the required ffprobe options and pass the path to ShellExecute
 	std::string probepath = "\"";
 	probepath += g_exePath;
-	probepath += "\\DATA\\FFMPEG\\probe.bat";
+	probepath += "DATA\\FFMPEG\\probe.bat";
 	probepath += "\"";
 
 	// Input to ffprobe
@@ -925,7 +1045,7 @@ bool ffprobe(std::string videoPath)
 	si.cb = sizeof(STARTUPINFO);
 	si.dwFlags = STARTF_USESHOWWINDOW;
 	si.wShowWindow = SW_HIDE; // hide the ffprobe console window
-	PROCESS_INFORMATION pi={};
+	PROCESS_INFORMATION pi{};
 	std::string cmdstring = probepath + " " + input;
 	if (CreateProcessA(NULL, (LPSTR)cmdstring.c_str(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
 		if (pi.hProcess) {
@@ -942,9 +1062,9 @@ bool ffprobe(std::string videoPath)
 	}
 
 	// Read the ini file produced by FFprobe to get the video information
-	char initfile[MAX_PATH]={};
+	char initfile[MAX_PATH]{};
 	strcpy_s(initfile, MAX_PATH, g_exePath.c_str());
-	strcat_s(initfile, MAX_PATH, "\\DATA\\FFMPEG\\myprobe.ini");
+	strcat_s(initfile, MAX_PATH, "DATA\\FFMPEG\\myprobe.ini");
 	if (_access(initfile, 0) == -1) {
 		MessageBoxA(NULL, "FFprobe ini file not found", "Warning", MB_OK | MB_TOPMOST);
 		return false;
@@ -955,13 +1075,13 @@ bool ffprobe(std::string videoPath)
 	// width=1280
 	// height = 720
 
-	char tmp[MAX_PATH]={};
+	char tmp[MAX_PATH]{};
 	DWORD dwResult = 0;
 	g_SenderWidth = 0;
 	g_SenderHeight = 0;
 
 	// Find the first video stream
-	char stream[32]={};
+	char stream[32]{};
 	for (int i=0; i<10; i++) { // arbritrary maximum
 		sprintf_s(stream, 32, "streams.stream.%d", i);
 		if (GetPrivateProfileStringA((LPCSTR)stream, (LPSTR)"codec_type", (LPSTR)"0", (LPSTR)tmp, 8, initfile) > 0) {
@@ -999,7 +1119,7 @@ int GetImageFiles(const char* spath, std::vector<std::string>&filenames)
 {
 	char tmp[MAX_PATH]{};
 	HANDLE filehandle = NULL;
-	WIN32_FIND_DATAA filedata;
+	WIN32_FIND_DATAA filedata{};
 
 	sprintf_s(tmp, MAX_PATH, "%s\\*.*", spath);
 	int nFiles = 0;
@@ -1033,18 +1153,48 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	char filepath[MAX_PATH]{};
 	std::string str;
 
+	// WM_TASKBARCREATED is sent when :
+	//   o Explorer is re-started
+	//   o New shell session starts (logon / switch user)
+	//   o Shell restart due to system-level reset
+	if (message == WM_TASKBARCREATED)
+    {
+		// Give Explorer time to rebuild
+		Sleep(500); 
+		// Restore wallpaper if changed
+		RestoreWallPaper();
+		// Do not restore daily wallpaper on exit
+		bDailyWallpaper = false;
+		// Add tray icon again
+        AddTrayIcon(hInst, hWndMain);
+		// Validate Worker window
+		ValidateWorker();
+		SpoutMessageBox(NULL, "Warning", "Taskbar re-created",
+						MB_OK | MB_ICONWARNING, 1500);
+		return 1;
+    }
+
 	switch (message) {
 
-	case SWM_TRAYMSG:
+	// Sent when the pixel format has changed
+	// Scaling, display size, orientation, color depth, remote desktop session, monitor
+	// This changes the wallpaper back to the original and replaces a daily
+	// or other image, but that is allowed for by check on exit.
+	case WM_DISPLAYCHANGE:
+		// Validate Worker window
+		ValidateWorker();
+		break;
 
+	case SWM_TRAYMSG:
 		switch(lParam) {
-			case WM_LBUTTONDBLCLK:
-				ShowWindow(hWnd, SW_RESTORE);
-				break;
+			// Show context menu with right mouse click
 			case WM_RBUTTONDOWN:
 			case WM_CONTEXTMENU:
 				ShowContextMenu(hWnd);
-		}
+				break;
+			default:
+				break;
+		} // end switch
 		break;
 
 	case WM_SYSCOMMAND:
@@ -1063,16 +1213,21 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		// ID has the item number of the selected Sender
 		if (Senders.size() > 0 && ID >= 0 && ID <= (int)Senders.size()) {
 			iter = std::next(Senders.begin(), ID);
-			namestring = *iter; // the selected Sender in the list
+			// the selected Sender in the list
+			namestring = *iter;
 			strcpy_s(name, namestring.c_str());
-			spout.SetActiveSender(name); // make it active
-			receiver.SetReceiverName(name); // set the name for the receiver to use
-			// Close video
+			// make it active
+			spout.SetActiveSender(name);
+			// Necessary
+			receiver.ReleaseReceiver();
+			// set the name for the receiver to use
+			receiver.SetReceiverName(name);
+			// Close video - clears FFmpeg, g_pixelBuffer and g_videopath
 			CloseVideo();
 			// Clear slideshow
 			slidenames.clear();
 			// Disable daily wallpaper display
-			// Do not bypass  Spout and Video in Render()
+			// Do not bypass Spout and Video in Render()
 			bShowDaily = false;
 			// Not showing original wallpaper
 			bCurrentWallpaper = false;
@@ -1086,6 +1241,8 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 			case SWM_EXIT:
 			{
+				if (!g_videopath.empty())
+					CloseVideo();
 				ShowWindow(hWnd, SW_HIDE);
 				DestroyWindow(hWnd);
 			}
@@ -1093,6 +1250,10 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 			case IDM_VIDEO:
 				{
+					// FFmpeg is required
+					if (!FindFFmpeg())
+						break;
+
 					if (OpenFile(filepath, MAX_PATH, true)) {
 						// Close existing video
 						CloseVideo();
@@ -1130,23 +1291,32 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				slidenames.clear();
 				// Default is image not downloaded
 				bDailyWallpaper = false;
+				// Set initial file
+				if(!g_dailywallpaperpath.empty())
+					strcpy_s(filepath, MAX_PATH, g_dailywallpaperpath.c_str());
 				if (OpenFile(filepath, MAX_PATH)) {
 					// Set the new wallpaper
-					SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filepath, SPIF_SENDCHANGE);
-					// Save the image path
-					g_dailywallpaperpath = filepath;
-					// Flag download of wallpaper for exit
-					bDailyWallpaper = true;
-					// Not showing original wallpaper
-					bCurrentWallpaper = false;
-					// Bypass Spout and Video in Render()
-					bShowDaily = true;
-					// Replace Bing daily image details with the image name
-					PathStripPathA(filepath);
-					copyright = filepath;
-					// Set timer for every 2 seconds
-					KillTimer(hWndMain, 1);
-					SetTimer(hWndMain, 1, 2000, NULL);
+					if (SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filepath, SPIF_SENDCHANGE)) {
+						// Save the image path
+						g_dailywallpaperpath = filepath;
+						// Flag download of wallpaper for exit
+						bDailyWallpaper = true;
+						// Not showing original wallpaper
+						bCurrentWallpaper = false;
+						// Bypass Spout and Video in Render()
+						bShowDaily = true;
+						// Replace Bing daily image details with the image name
+						PathStripPathA(filepath);
+						copyright = filepath;
+						if (bShowDetails) {
+							// Arbitrary wait for wallpaper before drawing text
+							Sleep(1000);
+							DrawString(copyright);
+						}
+						// Set timer for every 2 seconds
+						KillTimer(hWndMain, 1);
+						SetTimer(hWndMain, 1, 2000, NULL);
+					}
 				}
 			}
 			break;
@@ -1168,8 +1338,7 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 					// Download the json file describing the daily wallpaper
 					std::string jsonFile = g_exePath;
-					jsonFile += "\\";
-					jsonFile += "\\BingDaily.json";
+					jsonFile += "BingDaily.json";
 					const char* url = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=en-US";
 					if (URLDownloadToFileA(NULL, url, jsonFile.c_str(), 0, NULL) == S_OK) {
 						// Get the json file text as a single string
@@ -1183,22 +1352,34 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 								logstr += ""; // ensure a NULL terminator
 								logstream.close();
 								// Find the image url in the json string
-								std::string imageurl = logstr.substr(logstr.find("url")+6);
-								imageurl = imageurl.substr(0, imageurl.find("jpg")+3);
+								std::string imageurl = logstr.substr(logstr.find("url") + 6);
+								imageurl = imageurl.substr(0, imageurl.find("jpg") + 3);
 								std::string bingUrl = "https://www.bing.com";
 								bingUrl += imageurl;
+								imagepage = bingUrl; // In case the file is not found
 								// Find the title e.g "title":"An ice day to play"
-								std::string title = logstr.substr(logstr.find("title")+8);
-								title = title.substr(0, title.find("quiz")-3);
+								std::string title = logstr.substr(logstr.find("title") + 8);
+								title = title.substr(0, title.find("quiz") - 3);
 								// Remove all '?'
 								title.erase(std::remove(title.begin(), title.end(), '?'), title.end());
 								// Find the copyright description for About and Exit
-								copyright = logstr.substr(logstr.find("copyright")+12);
-								copyright = copyright.substr(0, copyright.find("copyrightlink")-3);
+								copyright = logstr.substr(logstr.find("copyright") + 12);
+								copyright = copyright.substr(0, copyright.find("copyrightlink") - 3);
 								// Make the file name to save
 								std::string filePath;
 								std::string fileName = g_exePath;
-								fileName += "\\DATA\\Images\\";
+								fileName += "DATA\\Images";
+								// Create the folder if it does not exist
+								if (_access(fileName.c_str(), 0) == -1) {
+									// Create the folder
+									// (returns after the folder has been created)
+									fs::create_directories(fileName);
+									if (_access(fileName.c_str(), 0) == -1) {
+										SpoutMessageBox(NULL, "Warning", "Could not create wallpaper folder",
+											MB_OK | MB_ICONWARNING, 1500);
+									}
+								}
+								fileName += "\\";
 								fileName += title;
 								fileName += ".jpg";
 								// Does the image already exist ?
@@ -1208,6 +1389,10 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 										// Set the image path
 										filePath = fileName;
 									}
+									else {
+										SpoutMessageBox("Could not download daily wallpaper");
+										filePath.clear();
+									}
 								}
 								else {
 									filePath = fileName;
@@ -1215,22 +1400,35 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 								if (!filePath.empty()) {
 									// Set the new wallpaper
-									SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filePath.c_str(), SPIF_SENDCHANGE);
-									// Save the daily wallpaper image path
-									g_dailywallpaperpath = filePath;
-									// Not showing original wallpaper
-									bCurrentWallpaper = false;
-									// Flag download of wallpaper for exit
-									bDailyWallpaper = true;
-									// Bypass Spout and Video in Render()
-									bShowDaily = true;
-									// Set timer for every 2 seconds
-									KillTimer(hWndMain, 1);
-									SetTimer(hWndMain, 1, 2000, NULL);
-
+									if (SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)filePath.c_str(), SPIF_SENDCHANGE)) {
+										// Save the daily wallpaper image path
+										g_dailywallpaperpath = filePath;
+										// Not showing original wallpaper
+										bCurrentWallpaper = false;
+										// Flag download of wallpaper for exit
+										bDailyWallpaper = true;
+										// Bypass Spout and Video in Render()
+										bShowDaily = true;
+										if (bShowDetails) {
+											// Arbitrary wait for wallpaper before drawing text
+											Sleep(1000);
+											DrawString(copyright);
+										}
+										// Set timer for every 2 seconds
+										KillTimer(hWndMain, 1);
+										SetTimer(hWndMain, 1, 2000, NULL);
+										// Find the Web page of the image to display
+										// in the about box for an extended description
+										std::string copyrightlink = logstr.substr(logstr.find("copyrightlink") + 16);
+										copyrightlink = copyrightlink.substr(0, copyrightlink.find("title") - 3);
+										imagepage = copyrightlink;
+									}
 								}
 							}
-							remove(jsonFile.c_str());
+							if (remove(jsonFile.c_str()) == 0) {
+								// DEBUG
+								// printf("Removed json file OK\n");
+							}
 						}
 					}
 				}
@@ -1240,6 +1438,10 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			{
 				char path[MAX_PATH]{};
 				char name[MAX_PATH]{};
+				// If the slideshow folder has not been selected yet
+				if (!g_slideshowpath[0] && !g_dailywallpaperpath.empty()) {
+					strcpy_s(g_slideshowpath, MAX_PATH, GetPath(g_dailywallpaperpath).c_str());
+				}
 				strcpy_s(path, MAX_PATH, g_slideshowpath); // starting folder
 				if (OpenFolder(path, MAX_PATH)) {
 					slidenames.clear();
@@ -1283,18 +1485,31 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				}
 			}
 			break;
+
+			case IDM_TITLE:
+			{
+				bShowDetails = !bShowDetails;
+			}
+			break;
 		
 			case IDM_ABOUT:
 			{
 				HICON hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_STEALTHDLG));
 				SpoutMessageBoxIcon(hIcon);
-				std::string str = "Version 1.004\n\nChange Windows wallpaper\nSpout sender, video, image, Bing daily, slideshow.\n\n";
+				std::string str = "Version 2.000\n\nChange Windows wallpaper\nSpout sender, video, image, Bing daily, slideshow.\n\n";
 				str +=	"<a href=\"https://spout.zeal.co/\">https://spout.zeal.co/</a>\n";
 				if (!copyright.empty()) {
 					str += "\nWallpaper image\n";
 					str += copyright;
-					str += "\n\n";
+					str += "\n";
 				}
+				if (!imagepage.empty()) {
+					str += "\n<a href=\""; str += imagepage; str += "\">";
+					str += "More information";
+					str += "</a>\n";
+				}
+				str += "\n";
+
 				SpoutMessageBox(NULL, str.c_str(), " ", MB_USERICON | MB_OK, "SpoutWallPaper");
 			}
 			break;
@@ -1312,9 +1527,11 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 	case WM_DESTROY:
 		niData.uFlags = 0;
+		// Remove the system tray icon
 		Shell_NotifyIcon(NIM_DELETE, &niData);
 		PostQuitMessage(0);
 		break;
+
 	}
 	return 0;
 }
@@ -1323,29 +1540,20 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 // Select slide duration aft selecting folder
 bool SelectSlideDuration()
 {
-	// 2, 4, 10, 30 seconds
-	// 1, 2,  4, 10 minutes
-	// 1, 2,  5, 10 hours
-	switch (g_slideshowtime) { // seconds
-		case     2: durationindex =  0; break; //  2 seconds
-		case     4: durationindex =  1; break; //  4 seconds
-		case    10: durationindex =  2; break; // 10 seconds
-		case    30: durationindex =  3; break; // 30 seconds
-		case    60: durationindex =  4; break; //  1 minute
-		case   120: durationindex =  5; break; //  2 minutes
-		case   240: durationindex =  6; break; //  4 minutes
-		case   600: durationindex =  7; break; // 10 minutes
-		case  1800: durationindex =  8; break; // 30 minutes
-		case  3600: durationindex =  9; break; //  1 hour (60 minutes)
-		case  7200: durationindex = 10; break; //  2 hours
-		case 14400: durationindex = 11; break; //  4 hours
-		case 36000: durationindex = 12; break; // 10 hours
-		default: break;
-	}
+	//
+	// duration index - 0 - 12
+	//
+	//  0 -    2,  1 -    4,  2 -   10,  3 -   30,           (2, 4, 10, 30 seconds)
+	//  4 -   60,  5 -  120,  6 -  240,  7 -  600, 9 - 1800  (1, 2,  4, 10, 30 minutes)
+	//  9 - 3600, 10 - 7200, 11 - 14400, 12 - 36000          (1, 2,  4, 10 hours)
+
 	// Show the dialog box 
-	if((int)DialogBoxA(hInst, MAKEINTRESOURCEA(IDD_DURATIONBOX), g_hWnd, (DLGPROC)SlideDuration) != 0) {
+	if((int)DialogBoxA(hInst, MAKEINTRESOURCEA(IDD_DURATIONBOX), g_hWnd, (DLGPROC)SlideDuration) != 0)
+	{
 		// OK - new duration has been selected
-		g_slideshowtime = (DWORD)duration[durationindex]; // seconds
+		// seconds per index
+		DWORD duration[13]={ 2, 4, 10, 30, 60, 120, 240, 600, 1800, 3600, 7200, 14400, 36000 };
+		g_slideshowtime = duration[g_slidedurationindex]; // seconds
 		return true;
 	}
 
@@ -1368,7 +1576,7 @@ INT_PTR CALLBACK SlideDuration(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		SendMessageA(hwndList, (UINT)CB_RESETCONTENT, 0, 0L);
 		for (int k = 0; k < 13; k++)
 			SendMessageA(hwndList, (UINT)CB_ADDSTRING, 0, (LPARAM)formats[k]);
-		SendMessageA(hwndList, CB_SETCURSEL, (WPARAM)durationindex, (LPARAM)0);
+		SendMessageA(hwndList, CB_SETCURSEL, (WPARAM)g_slidedurationindex, (LPARAM)0);
 
 		// Random
 		if (bRandom)
@@ -1382,12 +1590,12 @@ INT_PTR CALLBACK SlideDuration(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		// Combo box selection
 		if (HIWORD(wParam) == CBN_SELCHANGE) {
 			if ((HWND)lParam == GetDlgItem(hDlg, IDC_SLIDE_DURATION)) {
-				durationindex = static_cast<unsigned int>(SendMessageA((HWND)lParam, (UINT)CB_GETCURSEL, (WPARAM)0, (LPARAM)0));
+				g_slidedurationindex = static_cast<unsigned int>(SendMessageA((HWND)lParam, (UINT)CB_GETCURSEL, (WPARAM)0, (LPARAM)0));
 			}
 		}
 
 
-		// Drop though if not selected
+		// Drop through if not selected
 		switch (LOWORD(wParam)) {
 		case IDOK:
 			// Random slides 
@@ -1409,37 +1617,251 @@ INT_PTR CALLBACK SlideDuration(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 	return (INT_PTR)FALSE;
 }
 
-
-// Used by the OpenFolder function to choose a folder
-INT CALLBACK BrowseCallbackProc(HWND hwnd, UINT uMsg, LPARAM lp, LPARAM pData)
+// Enumerate windows to find the correct WorkerW or layered child
+BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam)
 {
-	TCHAR szDir[MAX_PATH];
-	TCHAR initialDir[MAX_PATH];
+	// *pRet for window access after enumeration.
+    HWND *pRet = (HWND*)lParam;
 
-	mbstowcs_s(NULL, &initialDir[0], MAX_PATH, &startingfolder[0], MAX_PATH);
+    HWND defView = FindWindowExA(hwnd, NULL, "SHELLDLL_DefView", NULL);
+    if (defView) {
+        // Try WorkerW windows (Windows 10 style)
+		HWND worker = FindWindowExA(NULL, hwnd, "WorkerW", NULL);
+		while (worker) {
+			// The first WorkerW is usually OK for Windows 10 but skip if hosting a desktop
+            HWND childView = FindWindowExA(worker, NULL, "SHELLDLL_DefView", NULL);
+            if (!childView) {
+                *pRet = worker;
+                return FALSE; // stop enumeration
+            }
+            worker = FindWindowExA(NULL, worker, "WorkerW", NULL);
+        }
 
-	switch (uMsg)
-	{
-	case BFFM_INITIALIZED:
-		_tcscpy_s(szDir, MAX_PATH, initialDir);
-		// Not working for modern interface
-		SendMessage(hwnd, BFFM_SETEXPANDED, TRUE, (LPARAM)szDir);
-		SendMessage(hwnd, BFFM_SETSELECTION, TRUE, (LPARAM)szDir);
-		break;
-	}
+        // Check for layered child (Windows 11)
+		HWND child = FindWindowExA(hwnd, NULL, NULL, NULL);
+		while (child) {
+            LONG_PTR exStyle = GetWindowLongPtr(child, GWL_EXSTYLE);
+			// Windows 11 desktop composition uses layered or redirected windows
+			// so check both WS_EX_LAYERED and WS_EX_NOREDIRECTIONBITMAP.
+			if (exStyle & WS_EX_LAYERED || exStyle & WS_EX_NOREDIRECTIONBITMAP) {
+                *pRet = child;
+                return FALSE; // stop enumeration
+            }
+            child = FindWindowExA(hwnd, child, NULL, NULL);
+        }
 
-	return 0;
+    }
+    return TRUE; // Keep enumerating
 }
 
-// To find the worker window
-BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam)
+//
+// Windows 10:
+//   EnumWindowsProc finds a WorkerW next to SHELLDLL_DefView.
+//   No WS_EX_LAYERED check.
+// Windows 11:
+//   Enumerate layered children for the correct window.
+//   If that fails, use Progman directly.
+//
+HWND GetWallpaperWindow()
 {
-	HWND hwnd = FindWindowEx(hWnd, NULL, L"SHELLDLL_DefView", NULL);
-	if (hwnd) {
-		HWND* ret = (HWND*)lParam;
-		*ret = FindWindowEx(NULL, hWnd, L"WorkerW", NULL);
+	// Find the Program Manager window
+    HWND progman = FindWindowA("Progman", NULL);
+	if (!progman)
+		return NULL;
+
+	// Send undocumented message 0x052C to Progman which directs
+	// it to spawn a Worker Window behind the desktop icons.
+	// Ignored for Windows 11 and if the worker window already exists.
+	// Necessary if explorer has been reset.
+	// See also WM_TASKBARCREATED and WM_DISPLAYCHANGE.
+	SendMessageTimeoutA(progman, 0x052C, NULL, NULL, SMTO_NORMAL, 1000, NULL);
+
+    // Poll until WorkerW exists or timeout.
+	// If Explorer is already running, WorkerW will exist almost
+	// immediately, but it might take more time if re-started.
+	HWND hWorker = nullptr;
+    auto startTime = std::chrono::steady_clock::now();
+    while (!hWorker) {
+		//
+		// Enumerate all top-level windows to find the correct WorkerW
+		//
+		// Windows 10:
+		//   EnumWindowsProc finds a WorkerW next to SHELLDLL_DefView.
+		//   No WS_EX_LAYERED check.
+		// Windows 11:
+		//   Enumerate layered children for the correct window.
+		//   If that fails, use Progman directly.
+        EnumWindows(EnumWindowsProc, (LPARAM)&hWorker);
+		if (hWorker)
+			break;
+
+        // Check timeout > 2 seconds
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count() > 2000)
+            break;
+
+        // Sleep to reduce loop CPU usage
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+	// Nothing found - fall back to Progman (Windows 11)
+    if (!hWorker) {
+        LONG_PTR exStyle = GetWindowLongPtr(progman, GWL_EXSTYLE);
+		if (exStyle & WS_EX_LAYERED || exStyle & WS_EX_NOREDIRECTIONBITMAP) {
+            hWorker = progman;
+        }
+    }
+
+	// Return the found WorkerW or NULL if none exists
+    return hWorker;
+}
+
+// Validate Worker window
+bool ValidateWorker()
+{
+	if (!IsWindow(g_WorkerHwnd)) {
+		HWND newHwnd = GetWallpaperWindow();
+		if (g_WorkerHwnd && IsWindow(newHwnd)) {
+			g_WorkerHwnd = newHwnd;
+		}
+		else {
+			// Could not acquire the wallpaper window
+			SpoutMessageBox(NULL, "Warning", "Could not acquire the wallpaper window",
+						MB_OK | MB_ICONWARNING, 1500);
+			return false;
+		}
 	}
-	return TRUE;
+	return true;
+}
+
+void RestoreWallPaper()
+{
+	// Get the current wallpaper if not done already
+	if (g_wallpaperpath.empty()) {
+		char szWallPaper[MAX_PATH]{};
+		SystemParametersInfoA(SPI_GETDESKWALLPAPER, MAX_PATH, (PVOID)szWallPaper, 0);
+		if (szWallPaper) g_wallpaperpath = szWallPaper;
+	}
+	// Restore original wallpaper if not being shown currently
+	if (!g_wallpaperpath.empty() && !bCurrentWallpaper) {
+		// Set the new wallpaper
+		SystemParametersInfoA(SPI_SETDESKWALLPAPER, 0, (void*)g_wallpaperpath.c_str(), SPIF_SENDCHANGE);
+		bCurrentWallpaper = true;
+	}
+}
+
+// Draw image details on screen
+void DrawString(std::string str)
+{
+	if (str.empty())
+		return;
+
+	HDC hdc = GetDCEx(g_WorkerHwnd, 0, DCX_WINDOW);
+	RECT dr{};
+	GetWindowRect(g_WorkerHwnd, &dr);
+
+	HFONT hFont, hOldFont;
+	hFont=CreateFontA(24, 0, 0, 0, FW_NORMAL, 0, 0, 0, 0, 0, 0, 2, 0, "SYSTEM_FIXED_FONT");
+	if (hOldFont = (HFONT)SelectObject(hdc, hFont))
+	{
+		// Text colour
+		COLORREF oldText = SetTextColor(hdc, 0x00000000); // black
+		// Transparent background
+		SetBkMode(hdc, TRANSPARENT);
+		// Display the text string
+		// Use a wide string to enable unicode characters
+		int size_needed = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), NULL, 0);
+		std::wstring wstrTemp(size_needed, 0);
+		MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &wstrTemp[0], size_needed);
+		// Get the width of the string
+		SIZE Size;
+		GetTextExtentPoint32A(hdc, str.c_str(), (int)str.length(), (LPSIZE)&Size);
+		// Center the string in the client width
+		int xpos = (dr.right-dr.left)/2 - Size.cx/2;
+		// above the taskbar
+		int ypos = dr.bottom - 90;
+		// Shadow
+		TextOutW(hdc, xpos+2, ypos+2, wstrTemp.c_str(), (int)wstrTemp.length());
+		SetTextColor(hdc, oldText);
+		oldText = SetTextColor(hdc, 0x00FFFFFF); // white
+		TextOutW(hdc, xpos, ypos, wstrTemp.c_str(), (int)wstrTemp.length());
+		// Restore objects
+		SetTextColor(hdc, oldText);
+		SelectObject(hdc, hOldFont);
+		DeleteObject(hOldFont);
+	}
+	ReleaseDC(g_WorkerHwnd, hdc);
+
+} // end text draw
+
+
+bool FindFFmpeg()
+{
+	if (g_ffmpegPath.empty()) {
+
+		g_ffmpegPath = g_exePath;
+		g_ffmpegPath += "DATA\\FFMPEG\\ffmpeg.exe";
+
+		// Also look for FFprobe.exe
+		std::string ffpath = g_exePath;
+		ffpath += "DATA\\FFMPEG\\ffprobe.exe";
+
+		// Location should be : \DATA\FFMPEG
+		if (_access(g_ffmpegPath.c_str(), 0) == -1 || _access(ffpath.c_str(), 0) == -1) {
+			std::string str = "o Go to <a href=\"https://github.com/GyanD/codexffmpeg/releases/\">https://github.com/GyanD/codexffmpeg/releases/</a>\n";
+			str += "o Choose the \"Essentials\" build. e.g.ffmpeg-5.1.2-essentials_build.zip\n";
+			str += "o Download and unzip the archive\n";
+			str += "o Copy bin\\FFmpeg.exe and bin\\FFprobe.exe to : DATA\\FFMPEG";
+			SpoutMessageBox("FFmpeg not found", str.c_str(), MB_OK | MB_TOPMOST);
+			return false;
+		}
+	}
+	return true;
+}
+
+
+void AddTrayIcon(HINSTANCE hinst, HWND hwnd)
+{
+	// Fill the NOTIFYICONDATA structure and call Shell_NotifyIcon
+	ZeroMemory(&niData, sizeof(NOTIFYICONDATA));
+
+	// Get Shell32 version number and set the size of the structure
+	ULONGLONG ullVersion = GetDllVersion(_T("Shell32.dll"));
+	if(ullVersion >= MAKEDLLVERULL(5, 0,0,0))
+		niData.cbSize = sizeof(NOTIFYICONDATA);
+	else 
+		niData.cbSize = NOTIFYICONDATA_V2_SIZE;
+
+	// Set the ID number (can be anything)
+	niData.uID = TRAYICONID;
+
+	// State which structure members are valid
+	niData.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; // Must receive messages
+	niData.dwState = 0x00000000; // not hidden
+	niData.dwStateMask = NIS_HIDDEN; // allow only the hidden state to be modified
+
+	// Load the icon
+	niData.hIcon = (HICON)LoadImage(hinst,
+									MAKEINTRESOURCE(IDI_STEALTHDLG),
+									IMAGE_ICON, 
+									GetSystemMetrics(SM_CXSMICON),
+									GetSystemMetrics(SM_CYSMICON),
+									LR_DEFAULTCOLOR);
+
+	// The window to send messages to and the message to send.
+	// Note: the message value should be in the range of WM_APP through 0xBFFF.
+	niData.hWnd = hwnd;
+    niData.uCallbackMessage = SWM_TRAYMSG;
+
+	wchar_t  ws[512]{};
+	wsprintf(ws, L"SpoutWallPaper");
+	lstrcpyn(niData.szTip, ws, sizeof(niData.szTip)/sizeof(TCHAR));
+	Shell_NotifyIcon(NIM_ADD, &niData);
+
+	// Free the icon handle
+	if(niData.hIcon && DestroyIcon(niData.hIcon))
+		niData.hIcon = NULL;
+
 }
 
 // there is no more

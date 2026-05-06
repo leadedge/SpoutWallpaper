@@ -1,1 +1,1 @@
-Folder for images.Daily wallpaper is downloaded to this folder.Image archive : https://bing.wallpaper.pics/  
+Daily images are saved and accumulated in this folder.An archive of all Bing wallpaper image can be found at:https://bing.wallpaper.pics/  
