@@ -30,5 +30,5 @@ SpoutWallpaper uses FFmpeg to play videos.
 FFmpeg.exe and FFprobe.exe are required.
 
 * Go to [https://github.com/GyanD/codexffmpeg/releases](https://github.com/GyanD/codexffmpeg/releases)
-* Choose the latest "Essentials" build. e.g. " ffmpeg-6.1.1-essentials_build.zip " and download the file.
+* Choose the latest "Essentials" build. e.g. " ffmpeg-8.1.1-essentials_build.zip " and download the file.
 * Unzip the archive and copy "bin\FFmpeg.exe" and "bin\FFprobe.exe" to : "SpoutWallpaper\DATA\FFMPEG\"
