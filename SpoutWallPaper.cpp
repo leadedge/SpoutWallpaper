@@ -134,6 +134,12 @@
 //				   Check current wallpaper on exit
 //				   Add not showing the daily wallpaper to slideshow
 //				   Version 2.000
+//		06.05.26 - Image details for slideshow
+//				   Remove image url for slideshow and images
+//		13.05.26 - Reduce hesitations for Spout source rendering
+//				   Sleep and yield in message loop for consistent rate
+//				   Remove FlushWait from spoutDX::ReadPixelData
+//				   Version 2.001
 //
 #include "stdafx.h"
 #include <windows.h>
@@ -425,7 +431,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	HICON hIcon = nullptr;
 	ExtractIconExA("%SystemRoot%\\system32\\imageres.dll", 76, &hIcon, NULL, 1);
 	SpoutMessageBoxIcon(hIcon);
-	SpoutMessageBox(NULL, "SpoutWallpaper 2.000", "Moving to the System Tray", MB_OK, 1500);
+	SpoutMessageBox(NULL, "SpoutWallpaper 2.001", "Moving to the System Tray", MB_OK, 1500);
 	
 	// Main message loop:
 	while (GetMessage(&msg, NULL, 0, 0)) {
@@ -435,9 +441,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}
-		if(msg.wParam != WM_QUIT)
+
+		if (msg.wParam != WM_QUIT) {
+			// See HoldFps in Render to limit rendering rate
 			Render();
-		Sleep(1); // Reduces CPU load
+		}
+
+		// Sleep and yield gives a consistent loop rate
+		std::this_thread::sleep_for(std::chrono::microseconds(50));
+		Yield();
 	}
 
 	KillTimer(hWndMain, 1);
@@ -1267,6 +1279,11 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 						bShowDaily = false;
 						// Not showing original wallpaper
 						bCurrentWallpaper = false;
+						// Replace Bing daily image details with the image name
+						PathStripPathA(filepath);
+						copyright = filepath;
+						// Remove daily image url
+						imagepage.clear();
 						// Set timer for 30 msec
 						KillTimer(hWndMain, 1);
 						SetTimer(hWndMain, 1, 30, NULL);
@@ -1308,6 +1325,8 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 						// Replace Bing daily image details with the image name
 						PathStripPathA(filepath);
 						copyright = filepath;
+						// Remove daily image url
+						imagepage.clear();
 						if (bShowDetails) {
 							// Arbitrary wait for wallpaper before drawing text
 							Sleep(1000);
@@ -1496,7 +1515,7 @@ INT_PTR CALLBACK DlgProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			{
 				HICON hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_STEALTHDLG));
 				SpoutMessageBoxIcon(hIcon);
-				std::string str = "Version 2.000\n\nChange Windows wallpaper\nSpout sender, video, image, Bing daily, slideshow.\n\n";
+				std::string str = "Version 2.001\n\nChange Windows wallpaper\nSpout sender, video, image, Bing daily, slideshow.\n\n";
 				str +=	"<a href=\"https://spout.zeal.co/\">https://spout.zeal.co/</a>\n";
 				if (!copyright.empty()) {
 					str += "\nWallpaper image\n";
